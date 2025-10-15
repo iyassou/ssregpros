@@ -1,0 +1,87 @@
+program: main.py
+project: ssregpros
+name: baseline-bayes
+method: bayes
+
+metric:
+  name: val/ncc_loss
+  goal: minimize
+
+run_cap: 100
+early_terminate:
+  type: hyperband
+  max_iter: 600 # Total number of (Phase A + B) epochs
+  eta: 3        # Culling to preserve top 1/η in each bracket
+  s: 4          # Number of brackets
+
+parameters:
+  # Reproducible Science
+  seed:
+    values: [0, 1, 2]
+
+  # Data Throughput
+  batch_size:
+    values: [4, 8, 16]
+  gradient_accumulation_steps:
+    values: [1, 2, 4]
+
+  # Network Architecture
+  regression_head_bottleneck_layer_size:
+    values: [64, 128, 256, 512]
+
+  # Composite Loss
+  # > NCC and Parameter Regularisation
+  L_ncc:
+    distribution: log_uniform
+    min: 0.25
+    max: 4.0
+  L_transformation_parameters:
+    distribution: log_uniform
+    min: 0.05
+    max: 2.0
+  # > Rigid Transform Regularisation Loss
+  L_scale:
+    value: 1
+  L_translation:
+    value: 1
+  scale_log_prior_confidence_interval:
+    value: 0.95
+
+  # Phase A: Linear Probe
+  lp_min_epochs:
+    value: 20
+  lp_max_epochs:
+    value: 200
+  lp_patience_steps:
+    value: 150
+  lp_learning_rate:
+    distribution: log_uniform
+    min: 1e-5
+    max: 1e-2
+  lp_weight_decay:
+    distribution: log_uniform
+    min: 1e-6
+    max: 1e-2
+
+  # Phase B: Fine-Tune
+  ft_min_epochs:
+    value: 20
+  ft_max_epochs:
+    value: 400
+  ft_patience_steps:
+    value: 300
+  ft_learning_rate:
+    distribution: log_uniform
+    min: 5e-6
+    max: 5e-4
+  ft_weight_decay:
+    distribution: log_uniform
+    min: 1e-6
+    max: 1e-2
+  ft_learning_rate_multipliers:
+    values:
+      - [1.0, 0.5, 0.25, 0.125]
+      - [0.75, 0.5, 0.25, 0.1]
+      - [0.5, 0.33, 0.2, 0.1]
+  ft_unfreeze_patience_steps:
+    value: 100

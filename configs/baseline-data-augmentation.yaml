@@ -1,0 +1,42 @@
+# =============================================================================
+# Baseline Data Augmentation Configuration for MRI-Histology Registration
+#
+# This is a reduced set of augmentations for initial experiments.
+# It focuses on the most common and impactful intensity variations
+# to establish a robust baseline without introducing excessive complexity.
+#
+# =============================================================================
+
+# >>> MRI Augmentations <<<
+# Bias field ............... [ENABLED]
+mri_bias_field_prob: 0.2
+mri_bias_field_degree: 10
+mri_bias_field_coeff_range: [0.0, 0.01]
+# Gaussian smoothing ....... [ENABLED]
+mri_gaussian_smooth_prob: 0.2
+mri_gaussian_smooth_sigma_x: [0.25, 1.5]
+mri_gaussian_smooth_sigma_y: [0.25, 1.5]
+mri_gaussian_smooth_approx: "erf"
+# Adjust contrast .......... [ENABLED]
+mri_adjust_contrast_prob: 0.2
+mri_adjust_contrast_gamma: [0.95, 1.05]
+# Rician noise ............. [ENABLED]
+mri_rician_noise_prob: 0.2
+mri_rician_noise_mean: 0.0
+mri_rician_noise_std: 0.01
+
+# >>> Histology Augmentations <<<
+# Gaussian smoothing ....... [ENABLED]
+hist_gaussian_smooth_prob: 0.2
+hist_gaussian_smooth_sigma_x: [0.25, 1.5]
+hist_gaussian_smooth_sigma_y: [0.25, 1.5]
+hist_gaussian_smooth_approx: "erf"
+
+# Adjust contrast .......... [ENABLED]
+hist_adjust_contrast_prob: 0.2
+hist_adjust_contrast_gamma: [0.95, 1.05]
+
+# Gaussian noise ........... [ENABLED]
+hist_gaussian_noise_prob: 0.2
+hist_gaussian_noise_mean: 0.0
+hist_gaussian_noise_std: 0.01

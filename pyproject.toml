@@ -1,0 +1,33 @@
+[project]
+name = "ssregpros"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "gitpython>=3.1.45",
+    "kornia>=0.8.1",
+    "monai[all]>=1.5.0",
+    "nibabel>=5.3.2",
+    "numpy>=2.3.2",
+    "opencv-python>=4.11.0.86",
+    "pandas[excel]>=2.3.1",
+    "pyyaml>=6.0.2",
+    "safetensors>=0.6.2",
+    "scikit-learn>=1.7.1",
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+    "wandb>=0.22.0",
+]
+
+[dependency-groups]
+dev = [
+    "black>=25.1.0",
+    "hypothesis>=6.138.16",
+    "pytest>=8.4.2",
+]
+
+[tool.black]
+line-length = 80
+target-version = ["py311"]
+skip-string-normalization = false

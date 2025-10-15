@@ -1,0 +1,16 @@
+preprocessor:
+  mri_orientation: "RAS"
+  mri_patch_size: 128
+  pixel_spacing_millimetres: 0.5
+  mri_mask_prostate_area_square_millimetres_threshold: 1600
+  tissue_fraction_estimation_thumbnail_max_size: 1024
+  macenko_pixel_count_threshold: 50000
+  histology_closing_se_kernel_size_percentage: 0.05
+  histology_gaussian_blur_kernel_size_percentage: 0.03
+
+registration_network:
+  height: 128
+  width: 128
+  model_name: "resnet18"
+  regression_head_shrinkage_range: [0, 0.5]
+
