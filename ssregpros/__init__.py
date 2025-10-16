@@ -2,8 +2,8 @@ from pathlib import Path
 
 SSREGPROS_ROOT = Path(__file__).parent
 PROJECT_ROOT = SSREGPROS_ROOT.parent
-WEIGHTS_ROOT = PROJECT_ROOT / "weights"
-WEIGHTS_ROOT.mkdir(exist_ok=True)
+CACHE_ROOT = PROJECT_ROOT / "cache"
+CACHE_ROOT.mkdir(exist_ok=True)
 _DATASET_ROOT = PROJECT_ROOT / "datasets"
 _DATASET_ROOT.mkdir(exist_ok=True)
 RAW_DATA_ROOT = _DATASET_ROOT / "raw"

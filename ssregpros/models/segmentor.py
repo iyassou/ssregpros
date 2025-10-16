@@ -1,4 +1,4 @@
-from .. import WEIGHTS_ROOT
+from .. import CACHE_ROOT
 from ..transforms.shared import MetaTensorLogging
 
 from monai.data.meta_tensor import MetaTensor
@@ -19,10 +19,116 @@ from nibabel.processing import resample_from_to
 
 from pathlib import Path
 
+import datetime
+import hashlib
+import httpx
+import json
 import torch
 import tqdm
 
 ORIGINAL_VOLUME_SHAPE_KEY = "original_volume_shape"
+
+
+def fetch_zenodo_record() -> dict:
+    """Retrieves the "Models for Prostate158" Zenodo record."""
+    TTL = datetime.timedelta(days=7)
+    ZENODO_RECORD_ID = 7040585
+    cached = CACHE_ROOT / f"zenodo-record-{ZENODO_RECORD_ID}.json"
+    if cached.exists():
+        creation_time = datetime.datetime.fromtimestamp(
+            cached.stat().st_mtime, tz=datetime.timezone.utc
+        )
+        now = datetime.datetime.now(tz=datetime.timezone.utc)
+        if now - creation_time < TTL:
+            with open(cached, "r") as handle:
+                return json.load(handle)
+    # Un-cached or stale: fetch from Zenodo.
+    url = f"https://zenodo.org/api/records/{ZENODO_RECORD_ID}"
+    r = httpx.get(url)
+    try:
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        e.add_note("Failed to retrieve `prostate158` Zenodo record!")
+        raise
+    record = r.json()
+    assert record["title"] == "Models for Prostate158"
+    with open(cached, "w") as handle:
+        json.dump(record, handle)
+    return record
+
+
+def retrieve_model_weights() -> Path:
+    """
+    Downloads the `prostate158` anatomy model's weights if not already
+    downloaded, and returns the file path.
+    """
+    # Retrieve Zenodo record.
+    record = fetch_zenodo_record()
+    # Retrieve anatomy model's metadata.
+    key = "anatomy.pt"
+    try:
+        anatomy_model_metadata = next(
+            x for x in record["files"] if x["key"] == key
+        )
+    except StopIteration:
+        raise FileNotFoundError(f"Could not locate {key}!")
+    # Retrieve checksum.
+    md5_checksum: str = anatomy_model_metadata["checksum"].removeprefix("md5:")
+    # Check if weights have already been downloaded.
+    filepath = CACHE_ROOT / f"prostate158-{key}"
+    if filepath.exists():
+        # Compare checksums.
+        md5 = hashlib.md5()
+        with open(filepath, "rb") as f:
+            while chunk := f.read(8192):
+                md5.update(chunk)
+        actual = md5.hexdigest()
+        if actual != md5_checksum:
+            raise ValueError(
+                f"checksum mismatch: cached={actual!r} does not match expected={md5_checksum!r}"
+            )
+        # Ready to go!
+        return filepath
+    # Download weights, compute checksum.
+    download_url = anatomy_model_metadata["links"]["self"]
+    md5 = hashlib.md5()
+    with httpx.stream(
+        "GET", download_url, follow_redirects=False, timeout=None
+    ) as r:
+        r.raise_for_status()
+        total_bytes = int(r.headers.get("content-length", 0))
+        chunk_size = 1 << 20
+        with (
+            open(filepath, "wb") as f,
+            tqdm.tqdm(
+                total=total_bytes,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc="Downloading Prostate158 Model Weights",
+                disable=(total_bytes == 0),
+            ) as pbar,
+        ):
+            try:
+                for chunk in r.iter_bytes(chunk_size=chunk_size):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    md5.update(chunk)
+                    pbar.update(len(chunk))
+            except KeyboardInterrupt:
+                # Delete partial download.
+                f.close()
+                filepath.unlink()
+                raise
+    # Compare checksums.
+    actual = md5.hexdigest()
+    if actual != md5_checksum:
+        raise ValueError(
+            f"checksum mismatch: downloaded={actual!r} does not match expected={md5_checksum!r}"
+        )
+    # Done!
+    return filepath
 
 
 class Segmentor:
@@ -48,7 +154,7 @@ class Segmentor:
             norm=Norm.BATCH,
             dropout=0.15,
         ).to(device)
-        with open(WEIGHTS_ROOT / "prostate158-anatomy.pt", "rb") as handle:
+        with open(retrieve_model_weights(), "rb") as handle:
             self.model.load_state_dict(
                 torch.load(handle, map_location=device, weights_only=True)
             )
