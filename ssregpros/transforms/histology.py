@@ -294,7 +294,6 @@ class DeconvolveHaematoxylinInRGBSpaced(MapTransform):
         haematoxylin = np.clip(haematoxylin, 0, self.OD_MAX)
         # Turn to RGB.
         haematoxylin = np.clip(I0 - I0 * np.exp(-haematoxylin), 0, I0)
-        breakpoint()
         # Done!
         tensor = MetaTensor(haematoxylin).copy_meta_from(hist)
         data[self.save_as] = tensor
