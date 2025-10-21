@@ -350,6 +350,8 @@ def train_model(
         root = PROJECT_ROOT / "checkpoints" / logger.run_id()
         root.mkdir(exist_ok=True, parents=True)
         training_config.checkpointer_root = root
+    else:
+        training_config.checkpointer_root /= logger.run_id()
     # Create checkpointers.
     monitored_metric = f"val/{training_config.monitored_validation_metric}"
     lp_checkpointer = Checkpointer(
