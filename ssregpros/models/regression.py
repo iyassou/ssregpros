@@ -36,7 +36,7 @@ class RegressionHeadConfig:
     bottleneck_layer_size: int
     shrinkage_range: tuple[Percentage, Percentage]
 
-    noise_weight: PositiveFloat = 1.0
+    noise_weight: PositiveFloat = 0.0
     translation_noise_std: PositiveFloat = 0.005
     rotation_noise_std: PositiveFloat = math.radians(1.5)
     log_scale_noise_std: PositiveFloat = 0.005
@@ -57,6 +57,7 @@ class RegressionHead(nn.Module):
         super().__init__()
         self.config = config
         self.regressor = nn.Sequential(
+            nn.LayerNorm(normalized_shape=config.num_input_features),
             nn.Linear(
                 in_features=config.num_input_features,
                 out_features=config.bottleneck_layer_size,
