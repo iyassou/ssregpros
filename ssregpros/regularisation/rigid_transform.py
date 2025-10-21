@@ -11,10 +11,10 @@ import torch
 
 @dataclass
 class RigidTransformRegularisationLossConfig:
-    translation_weight: float
-    scale_weight: float
-    scale_log_prior_confidence_interval: Percentage
     regression_head_shrinkage_range: tuple[Percentage, Percentage]
+    translation_weight: float = 1.0
+    scale_weight: float = 1.0
+    scale_log_prior_confidence_interval: Percentage = 0.95
 
 
 class RigidTransformRegularisationLoss(torch.nn.modules.loss._Loss):

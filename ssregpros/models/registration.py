@@ -30,11 +30,14 @@ class RegistrationNetworkOutput(NamedTuple):
 @dataclass
 class RegistrationNetworkConfig:
     seed: int
-    height: int
-    width: int
     resnet: ResNetVariant
     regression_head_bottleneck_layer_size: int
-    regression_head_shrinkage_range: tuple[Percentage, Percentage]
+    regression_head_shrinkage_range: tuple[Percentage, Percentage] = (
+        0.05,
+        0.25,
+    )
+    height: int = 128
+    width: int = 128
     device: torch.device = torch.device("cpu")
 
 
