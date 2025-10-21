@@ -1,7 +1,7 @@
 from ssregpros.datasets.fake_histo_mri.fake_histo_mri import FakeHistoMri
 from ssregpros.loss.composite import CompositeLossConfig
 from ssregpros.models.registration import RegistrationNetworkConfig
-from ssregpros.models.segmentor import Segmentor, SegmentorConfig
+from ssregpros.models.segmentor import Segmentor
 from ssregpros.regularisation.rigid_transform import (
     RigidTransformRegularisationLossConfig,
 )
@@ -68,18 +68,18 @@ def parse_args() -> argparse.Namespace:
 
 def split_dataset(
     seed: int,
-    segmentor_config: SegmentorConfig,
     preprocessor_config: PreprocessorConfig,
     training_data_augmentation: DataAugmentation,
     split: tuple[float, float, float],
+    device: torch.device,
 ):
     # Create dataset.
     dataset = Dataset(
         correspondence_discoverer=FakeHistoMri(),
-        segmentor=Segmentor(segmentor_config),
+        segmentor=Segmentor(device=device),
         preprocessor=Preprocessor(preprocessor_config),
         cache_dir=FILE_DIR_PATH / "cache",
-        device=segmentor_config.device,
+        device=device,
     )
     # Split dataset.
     train, val, test = patient_stratified_split(
@@ -101,9 +101,16 @@ def main():
     # Read config.
     with open(args.config, "rb") as handle:
         config = yaml.safe_load(handle)
+    # Create model config.
+    model_config = RegistrationNetworkConfig(
+        seed=config["seed"],
+        **config["registration_network"],
+        device=device,
+    )
     # Create loss config.
     reg_config = RigidTransformRegularisationLossConfig(
-        **config["loss"].pop("regularisation")
+        **config["loss"].pop("regularisation", {}),
+        regression_head_shrinkage_range=model_config.regression_head_shrinkage_range,
     )
     loss_config = CompositeLossConfig(
         **config["loss"],
@@ -116,20 +123,15 @@ def main():
         checkpointer_root=FILE_DIR_PATH / "checkpoints",
         **config["training"],
     )
-    # Create model config.
-    model_config = RegistrationNetworkConfig(
-        seed=config["seed"], **config["registration_network"], device=device
-    )
     # Create dataloaders.
-    segmentor_config = SegmentorConfig(device=device)
     preprocessor_config = PreprocessorConfig(**config["preprocessor"])
     aug = DataAugmentation()
     train, val, _ = split_dataset(
         seed=config["seed"],
-        segmentor_config=segmentor_config,
         preprocessor_config=preprocessor_config,
         training_data_augmentation=aug,
         split=config["dataset_split"],
+        device=device,
     )
     train_dl = DataLoader(
         train,
