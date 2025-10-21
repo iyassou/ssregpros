@@ -79,7 +79,7 @@ class HistoMri(CorrespondenceDiscoverer):
                     dataset_id=self.dataset_id,
                     patient_id=patient_id,
                     mri_filepath=mri_filepath,
-                    mri_slice_index=mri_slice_index,
+                    mri_slice_index=-mri_slice_index,
                     mri_slice_axis=MRIAxis.AXIAL,
                     histology_filepath=histology_filepath,
                 )
