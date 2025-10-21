@@ -128,7 +128,11 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "-o",
         "--output",
-        default="ssregpros/datasets/histo_mri/corrs.bin",
+        default=FILE_PATH.parent.parent.parent
+        / "ssregpros"
+        / "datasets"
+        / "histo_mri"
+        / "corrs.bin",
         type=Path,
         help="Output file to write the zlib compressed correspondences to",
     )
@@ -154,8 +158,6 @@ def main():
     ]
     num_patients = len(set(c.patient_id for c in corrs))
     buf = serialise(corrs)
-    if not args.output.parent.exists():
-        args.output = FILE_PATH / "corrs.bin"
     with open(args.output, "wb") as out:
         out.write(buf)
     print(
