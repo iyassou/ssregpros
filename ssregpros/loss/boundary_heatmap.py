@@ -68,9 +68,9 @@ class BoundaryHeatmapMSELoss(torch.nn.modules.loss._Loss):
         Parameters
         ----------
         y_true: torch.Tensor
-            Shape (B, 1, H, W), torch.bool
+            Shape (B, 1, H, W), torch.float32
         y_pred: torch.Tensor
-            Shape (B, 1, H, W), torch.bool
+            Shape (B, 1, H, W), torch.float32
 
         Returns
         -------
@@ -85,9 +85,8 @@ class BoundaryHeatmapMSELoss(torch.nn.modules.loss._Loss):
         if (C := y_true.size(1)) != 1:
             raise ValueError(f"expected number of channels to be 1, got {C=}")
         # Obtain boundary heatmaps.
-        # NOTE: converting to torch.float32 is critical for gradients to flow.
-        heatmap_true = self.boundary_heatmap(y_true.float())
-        heatmap_pred = self.boundary_heatmap(y_pred.float())
+        heatmap_true = self.boundary_heatmap(y_true)
+        heatmap_pred = self.boundary_heatmap(y_pred)
 
         # =====
         if False:
