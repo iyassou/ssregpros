@@ -4,9 +4,10 @@ from ..core.type_definitions import Percentage
 from ..models.segmentor import Segmentor
 from ..transforms.preprocessor import (
     Preprocessor,
-    PREPROCESSOR_PIPELINE_KEYS,
+    PreprocessorPipelineKeys,
 )
 from .segmentation_manager import SegmentationManager
+from .utils import pformat_transform
 
 from monai.data.dataset import PersistentDataset
 from monai.data.meta_tensor import MetaTensor
@@ -40,6 +41,12 @@ class MultiModalDataset(torch.utils.data.Dataset):
         device: torch.device = torch.device("cpu"),
     ):
         self.device = device
+        # Save preprocessor signatures.
+        self.preprocessor_signature = (
+            pformat_transform(preprocessor._build_mri_pipeline())
+            + pformat_transform(preprocessor._build_histology_pipeline())
+        ).encode("utf-8")
+        self._pp_cfg_sig = preprocessor.config.hash_string().encode("utf-8")
         # Batch segment unique masks.
         manager = SegmentationManager(
             segmentor=segmentor,
@@ -48,66 +55,79 @@ class MultiModalDataset(torch.utils.data.Dataset):
         )
         masks = manager.compute_masks(progress_bar=segmentation_progress_bar)
         # Build preprocessing pipeline inputs.
-        # Some data points are invalid, and unfortunately this is where
-        # I'm able to deal with it.
-        data = []
-        for corr in correspondence_discoverer.correspondences():
-            inpt = preprocessor.build_input(corr, masks[corr.mri_filepath])
-            if PREPROCESSOR_PIPELINE_KEYS.EARLY_EXIT not in inpt:
-                data.append(inpt)
-        self._len = len(data)
+        data = [
+            preprocessor.build_input(corr, masks[corr.mri_filepath])
+            for corr in correspondence_discoverer.correspondences()
+        ]
         # Build PersistentDataset for cached preprocessing.
         if cache_dir is None:
             cache_dir = (
                 PROCESSED_DATA_ROOT / correspondence_discoverer.dataset_id
             )
         cache_dir /= "dataset"
-        cache_dir.mkdir(exist_ok=True, parents=True)
+        verbose = not cache_dir.exists()
         self.persistent_dataset = PersistentDataset(
             data=data,
             transform=preprocessor,
             cache_dir=cache_dir,
-            hash_func=self._preprocessor_input_hash_func,
+            hash_func=self._preprocessor_input_hasher,
             pickle_protocol=pickle.HIGHEST_PROTOCOL,
         )
+        # Some data points are invalid, unfortunately this is where I find out.
+        self.valid_data = []
+        out: dict
+        for (
+            out
+        ) in self.persistent_dataset:  # pyright: ignore[reportAssignmentType]
+            if (reason := out.get(PreprocessorPipelineKeys.EARLY_EXIT)) is None:
+                self.valid_data.append(
+                    {
+                        k: (
+                            v.to(self.device)
+                            if isinstance(v, torch.Tensor)
+                            else v
+                        )
+                        for k, v in out.items()
+                    }
+                )
+            elif verbose:
+                print(
+                    f"{out[PreprocessorPipelineKeys.CORRESPONDENCE]} | {reason}"
+                )
 
-    def _preprocessor_input_hash_func(self, data: dict) -> bytes:
+    def _preprocessor_input_hasher(self, data: dict) -> bytes:
         """
-        Create a unique hash for preprocessing caching, using the
-        correspondence and mask inputs.
+        Create a unique hash for preprocessing caching.
         """
         # Retrieve arguments.
-        corr: Correspondence = data[PREPROCESSOR_PIPELINE_KEYS.CORRESPONDENCE]
-        mask: MetaTensor = data[PREPROCESSOR_PIPELINE_KEYS.MRI_MASK]
-        # Compute hash.
+        corr: Correspondence = data[PreprocessorPipelineKeys.CORRESPONDENCE]
+        mask: MetaTensor = data[PreprocessorPipelineKeys.MRI_MASK]
+        # Compute unique hash.
+        # NOTE: .digest() exists, but PersistentDataset UTF-8 -decodes this
+        #       hash to determine the output file name.
         corr_signature = corr.hash_string().encode("utf-8")
         mask_signature = mask.numpy().tobytes()
-        md5_hash = hashlib.md5(corr_signature + mask_signature).hexdigest()
+        md5_hash = hashlib.md5(
+            corr_signature
+            + mask_signature
+            + self.preprocessor_signature
+            + self._pp_cfg_sig
+        ).hexdigest()
         return md5_hash.encode("utf-8")
 
     def __len__(self):
-        return self._len
+        return len(self.valid_data)
 
     def __getitem__(self, j: int) -> dict:
-        data: dict = self.persistent_dataset[
-            j
-        ]  # pyright: ignore[reportAssignmentType]
-        return {
-            k: (v.to(self.device) if isinstance(v, MetaTensor) else v)
-            for k, v in data.items()
-        }
+        return self.valid_data[j]
 
     def full_patient_ids(self) -> list[str]:
         """Return a list of each datapoint's full patient identifier.
         Useful for avoiding data leakage when splitting the dataset."""
         ids: list[str] = []
-        for j in range(len(self)):
-            data: dict = self.persistent_dataset[
-                j
-            ]  # pyright: ignore[reportAssignmentType]
-            corr: Correspondence = data[
-                PREPROCESSOR_PIPELINE_KEYS.CORRESPONDENCE
-            ]
+        data: dict
+        for data in self.valid_data:
+            corr: Correspondence = data[PreprocessorPipelineKeys.CORRESPONDENCE]
             ids.append(corr.full_patient_id())
         return ids
 
