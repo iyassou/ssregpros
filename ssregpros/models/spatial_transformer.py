@@ -1,3 +1,4 @@
+from ..core.type_definitions import StrictlyPositiveInteger
 from .regression import RegressionTransformedParameters
 
 import torch
@@ -15,9 +16,6 @@ class SpatialTransformerNetwork(torch.nn.Module):
         self.height = height
         self.width = width
         self.device = device
-
-    def output_size(self, batch_size: int, num_channels: int) -> torch.Size:
-        return torch.Size((batch_size, num_channels, self.height, self.width))
 
     def build_theta(
         self, params: RegressionTransformedParameters
@@ -52,7 +50,10 @@ class SpatialTransformerNetwork(torch.nn.Module):
         return torch.cat([A, t.unsqueeze(-1)], dim=2)  # shape: (B, 2, 3)
 
     def forward(
-        self, x: torch.Tensor, theta: torch.Tensor, mode: str
+        self,
+        x: torch.Tensor,
+        theta: torch.Tensor,
+        mode: str,
     ) -> torch.Tensor:
         """Takes in the images to be warped, as well as their affine
         transformation matrices.
@@ -63,6 +64,8 @@ class SpatialTransformerNetwork(torch.nn.Module):
             Input images, shape (B, C, H, W), numeric type
         theta: torch.Tensor
             Affine transformation matrices, shape (B, 2, 3)
+        mode: str
+            The grid sampling mode
 
         Returns
         -------
@@ -70,19 +73,20 @@ class SpatialTransformerNetwork(torch.nn.Module):
             Warped batch of images resampled to the fixed output size,
             shape (B, C, self.height, self.width)
         """
-        # Calculate output size.
         assert x.ndim == 4
-        batch_size = x.size(0)
-        num_channels = x.size(1)
-        output_size = self.output_size(batch_size, num_channels)
         # Generate the sampling grid.
         grid = F.affine_grid(
             theta,
-            output_size,  # pyright: ignore[reportArgumentType]
-            align_corners=False,
+            (
+                x.size(0),
+                x.size(1),
+                self.height,
+                self.width,
+            ),  # pyright: ignore[reportArgumentType]
+            align_corners=True,
         )
         # Sample the input image using the grid.
         warped_x = F.grid_sample(
-            x, grid, mode=mode, padding_mode="zeros", align_corners=False
+            x, grid, mode=mode, padding_mode="zeros", align_corners=True
         )
         return warped_x
