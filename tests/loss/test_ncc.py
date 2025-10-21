@@ -10,7 +10,7 @@ from hypothesis import given, HealthCheck, settings, strategies as st
 settings.register_profile("no_deadline", deadline=None)
 settings.load_profile("no_deadline")
 
-ATOL = 1e-5
+ATOL = 1e-8
 
 
 def get_available_gpu() -> torch.device | None:
@@ -24,7 +24,7 @@ def get_available_gpu() -> torch.device | None:
 @pytest.fixture
 def loss_fn():
     """Default loss function for testing"""
-    return Loss(reduction=Reduction.NONE)
+    return Loss(reduction=Reduction.MEAN)
 
 
 @pytest.fixture
@@ -140,8 +140,8 @@ def test_scale_invariance_property(loss_fn, scale_true, scale_pred):
     y_pred = torch.randn(1, 1, 4, 4)
     mask = torch.ones(1, 1, 4, 4, dtype=torch.bool)
 
-    loss_original = loss_fn(y_true, y_pred, mask)
-    loss_scaled = loss_fn(scale_true * y_true, scale_pred * y_pred, mask)
+    loss_original = loss_fn(y_true, y_pred, mask).mean()
+    loss_scaled = loss_fn(scale_true * y_true, scale_pred * y_pred, mask).mean()
 
     assert torch.isclose(loss_original, loss_scaled, atol=ATOL)
 
@@ -260,7 +260,7 @@ def test_multichannel_with_multichannel_mask(loss_fn):
 
 
 def test_none_reduction():
-    """Test NONE reduction (simple average)"""
+    """Test NONE reduction (no average)"""
     loss_fn = Loss(reduction=Reduction.NONE)
 
     # Create batch where one has perfect correlation, other has anti-correlation
@@ -279,7 +279,7 @@ def test_none_reduction():
 
     mask = torch.ones(2, 1, 2, 2, dtype=torch.bool)
 
-    loss = loss_fn(y_true, y_pred, mask)
+    loss = loss_fn(y_true, y_pred, mask).mean()
     # First batch: NCC = 1 (perfect correlation), so loss contribution = 0.5 * (1 - NCC) = 0
     # Second batch: NCC = -1 (perfect anti-correlation), so loss contribution = 0.5 * (1 - NCC) = 1
     expected = 1.0 / 2  # Average of 0 and 1
@@ -575,4 +575,4 @@ def test_consistency_across_devices():
 
     loss_gpu = loss_fn_gpu(y_true_gpu, y_pred_gpu, mask_gpu)
 
-    assert torch.isclose(loss_cpu, loss_gpu.cpu(), atol=ATOL)
+    assert torch.isclose(loss_cpu, loss_gpu.cpu(), atol=ATOL).all()
