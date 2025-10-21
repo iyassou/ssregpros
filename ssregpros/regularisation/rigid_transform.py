@@ -21,11 +21,46 @@ class RigidTransformRegularisationLoss(torch.nn.modules.loss._Loss):
     """Penalises rigid transformations with excessive translations and scale
     predictions outside of the hypothesised range."""
 
-    NORMAL_GAUSSIAN = torch.distributions.Normal(loc=0, scale=1)
-
     def __init__(self, config: RigidTransformRegularisationLossConfig):
         super().__init__()
         self.config = config
+        self.precompute_log_scale_parameters()
+
+    def precompute_log_scale_parameters(self):
+        """
+        Notes
+        -----
+        We regularise log(scale) as we're performing MAP with a log-normal
+        prior on the scale.
+        The prior is on log(scale) because that matches multiplicative
+        physics and should then give better gradients when training.
+        Our scale range is configured using the literature. For a scale range
+        of [a, b] and CI 95%, we
+            (1) set the centre to the geometric mean:
+                    µ = log√(ab) = 0.5 * (log(a) + log(b))
+            (2) set the spread so that `a` and `b` are the 2.5% and 97.5%
+                points:
+                    σ = (log(b) - log(a)) / (Φ^{-1}(0.975) - Φ^{-1}(0.025))
+                    = (log(b) - log(a)) / (2 * Φ^{-1}(0.975)) because symmetry
+                    ≈ (log(b) - log(a)) / 3.92
+        """
+        # (i) mu
+        a, b = (
+            torch.Tensor([x])
+            for x in shrinkage_range_to_STN_scale_range(
+                self.config.regression_head_shrinkage_range
+            )
+        )
+        self.log_scale_mu = 0.5 * (torch.log(a) + torch.log(b))
+        # (ii) sigma
+        scale_percentile = (
+            self.config.scale_log_prior_confidence_interval
+            + (1 - self.config.scale_log_prior_confidence_interval) / 2
+        )
+        normal_gaussian = torch.distributions.Normal(loc=0, scale=1)
+        self.log_scale_sigma: torch.Tensor = (torch.log(b) - torch.log(a)) / (
+            2 * normal_gaussian.icdf(torch.Tensor([scale_percentile]))
+        )
 
     def forward(
         self, parameters: RegressionTransformedParameters
@@ -43,21 +78,6 @@ class RigidTransformRegularisationLoss(torch.nn.modules.loss._Loss):
         -----
         We regularise the translation components to penalise large deviations
         from center of the image in normalised image coordinates.
-
-        We regularise log(scale) as we're performing MAP with a log-normal
-        prior on the scale.
-        The prior is on log(scale) because that matches multiplicative
-        physics and should then give better gradients when training.
-        Our scale range is configured using the literature. For a scale range
-        of [a, b] and CI 95%, we
-            (1) set the centre to the geometric mean:
-                    µ = log√(ab) = 0.5 * (log(a) + log(b))
-            (2) set the spread so that `a` and `b` are the 2.5% and 97.5%
-                points:
-                    σ = (log(b) - log(a)) / (Φ^{-1}(0.975) - Φ^{-1}(0.025))
-                      = (log(b) - log(a)) / (2 * Φ^{-1}(0.975)) because symmetry
-                      ≈ (log(b) - log(a)) / 3.92
-
         We apply no regularisation to the rotation component since the
         predicted values already have unit norm.
 
@@ -68,26 +88,13 @@ class RigidTransformRegularisationLoss(torch.nn.modules.loss._Loss):
         # Regularise translation components with a zero-value assumption.
         tx = parameters.tx
         ty = parameters.ty
-        translation_reg = (tx**2).mean() + (ty**2).mean()  # shape: (B,)
+        translation_reg = (tx**2).mean() + (ty**2).mean()
         # Regularise scale component with a log prior.
         scale = parameters.scale
-        a, b = shrinkage_range_to_STN_scale_range(
-            self.config.regression_head_shrinkage_range
-        )
-        a = torch.Tensor([a])
-        b = torch.Tensor([b])
-        mu = 0.5 * (torch.log(a) + torch.log(b))
-        percentile = (
-            self.config.scale_log_prior_confidence_interval
-            + (1 - self.config.scale_log_prior_confidence_interval) / 2
-        )
-        sigma = (torch.log(b) - torch.log(a)) / (
-            2 * self.NORMAL_GAUSSIAN.icdf(torch.Tensor([percentile]))
-        )
         log_scale = torch.log(scale)
         eps = torch.finfo(torch.float32).eps
-        z = (log_scale - mu) / (sigma + eps)
-        scale_reg: torch.Tensor = (z**2).mean()  # shape: (B,)
+        z = (log_scale - self.log_scale_mu) / (self.log_scale_sigma + eps)
+        scale_reg: torch.Tensor = (z**2).mean()
         # Combine.
         dev = parameters.tx.device  # wlog
         translation_weight, scale_weight = (
