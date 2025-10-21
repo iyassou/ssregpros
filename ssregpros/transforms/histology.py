@@ -5,11 +5,12 @@ from monai.apps.pathology.transforms.stain.array import ExtractHEStains
 from monai.config.type_definitions import KeysCollection
 from monai.data.meta_tensor import MetaTensor
 from monai.data.wsi_reader import WSIReader
+from monai.transforms.intensity.array import ScaleIntensityRangePercentiles
 from monai.transforms.transform import MapTransform
 
 
-from copy import deepcopy
 from enum import StrEnum
+from typing import Hashable
 
 import cv2
 import openslide
@@ -25,13 +26,88 @@ class HistologyMetadataKeys(StrEnum):
 
 
 class HistologyPipelineKeys(StrEnum):
+    # Reading in the NDPI image.
     HISTOLOGY = "histology"
+    # Binary mask for stain deconvolution.
+    STAIN_DECONVOLUTION_TISSUE_MASK = "stain_deconvolution_tissue_mask"
+    # Deconvolve haematoxylin image.
+    HAEMATOXYLIN = "haematoxylin"
+    # Obtain binary mask.
     HISTOLOGY_MASK = "histology_mask"
+    HAEMATOXYLIN_MASK = "haematoxylin_mask"
 
-    MACENKO_STAIN_DECONVOLUTION_MASK = "macenko_stain_deconvolution_mask"
 
-    HISTOLOGY_FOR_VISUALISATION = "histology_for_visualisation"
-    MASK_FOR_VISUALISATION = "histology_mask_for_visualisation"
+def clean_up_mask(
+    raw_mask: np.ndarray,
+    ellipse_axes_size_percentage: tuple[Percentage, Percentage],
+    minimum_hole_area_ratio: StrictlyPositiveFloat,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Clean up 'artefacts' from a binary mask using morphological operations.
+
+    Parameters
+    ----------
+    raw_mask: np.ndarray
+    ellipse_axes_size_percentage: tuple[Percentage, Percentage]
+        Ellipse axes specified as percentage of limiting dimension
+    minimum_hole_area_ratio: StrictlyPositiveFloat
+        Cut out contours whose area is larger than this fraction of the largest
+        contour, otherwise leave them filled in.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        "Cleaner" mask, "cleaner" mask with no holes cut out
+    """
+    # Stage 1: Morphologically close for initial cleanup.
+    morph_size = tuple(
+        max(3, (m := round(ax * min(raw_mask.shape))) + (~m & 1))
+        for ax in ellipse_axes_size_percentage
+    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, morph_size)
+    closed_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_CLOSE, kernel)
+    # Stage 2: Contour-based hole filling.
+    contours, hierarchy = cv2.findContours(
+        closed_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        raise ValueError("no contours found")
+    #   2.a) Find largest contour and fill it.
+    largest_contour_idx = max(
+        range(len(contours)), key=lambda i: cv2.contourArea(contours[i])
+    )
+    largest_contour = contours[largest_contour_idx]
+    filled_mask = np.zeros_like(raw_mask)
+    cv2.drawContours(
+        filled_mask,
+        [largest_contour],
+        -1,
+        color=255,  # type: ignore
+        thickness=cv2.FILLED,
+    )
+    #   2.b) Find child contours and erode them away
+    punctured_mask = np.copy(filled_mask)
+    if minimum_hole_area_ratio > 0:
+        largest_area = cv2.contourArea(largest_contour)
+        if hierarchy is not None:
+            hierarchy = hierarchy[
+                0
+            ]  # Shape: (N, 4) where columns are [Next, Previous, First_Child, Parent]
+            # Find all child contours of the largest contour
+            for i, h in enumerate(hierarchy):
+                parent_idx = h[3]  # Parent index
+                if parent_idx == largest_contour_idx:
+                    hole_area = cv2.contourArea(contours[i])
+                    if hole_area / largest_area >= minimum_hole_area_ratio:
+                        # Cut this hole out
+                        cv2.drawContours(
+                            punctured_mask,
+                            [contours[i]],
+                            -1,
+                            color=0,  # type: ignore
+                            thickness=cv2.FILLED,
+                        )
+    return punctured_mask, filled_mask
 
 
 class DynamicOpenSlideReader(WSIReader):
@@ -101,30 +177,30 @@ class DynamicOpenSlideReader(WSIReader):
         return img, meta
 
 
-class BinaryMaskForStainDeconvolutiond(MapTransform):
+class EstimateTissueForStainDeconvolutiond(MapTransform):
     """
-    Compute a binary mask using Otsu's algorithm to roughly identify tissue
-    pixels in the histology. This is useful for the subsequent Macenko stain
-    deconvolution stage, which will be able to obtain a statistically robust
-    sample relying mostly on tissue rather than all available pixels i.e.
-    including white background.
+    Compute a binary mask using Otsu's algorithm and some morphological ops to
+    to roughly identify tissue pixels in the histology. This is useful for the
+    subsequent Macenko stain deconvolution stage, which will be able to obtain
+    a statistically robust sample relying mostly on tissue rather than all
+    available pixels i.e. including white background.
     """
 
     def __init__(
         self,
+        save_as: Hashable,
         closing_se_kernel_size_percentage: Percentage,
-        gaussian_blur_kernel_size_percentage: Percentage,
+        minimum_hole_area_ratio: StrictlyPositiveFloat,
     ):
         super().__init__(
             keys=(HistologyPipelineKeys.HISTOLOGY,),
             allow_missing_keys=False,
         )
+        self.save_as = save_as
         self.closing_se_kernel_size_percentage = (
             closing_se_kernel_size_percentage
         )
-        self.gaussian_blur_kernel_size_percentage = (
-            gaussian_blur_kernel_size_percentage
-        )
+        self.minimum_hole_area_ratio = minimum_hole_area_ratio
 
     def __call__(self, data: dict) -> dict:
         # Obtain histology.
@@ -132,68 +208,60 @@ class BinaryMaskForStainDeconvolutiond(MapTransform):
         # Apply Otsu's algorithm.
         grey = F.rgb_to_grayscale(hist, num_output_channels=1)
         grey = grey.squeeze(0)  # remove channel dimension
+        grey_np = grey.numpy()
         _, mask = cv2.threshold(
-            grey.numpy(), 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
+            grey_np, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
         )
-        # Create and store binary mask.
-        data[HistologyPipelineKeys.MACENKO_STAIN_DECONVOLUTION_MASK] = (
-            torch.from_numpy(mask.astype(bool))
-        )  # shape: (H, W)
-        # Create visualisation binary mask.
-        # (1) Morphologically close
-        morph_size = max(
-            3, round(self.closing_se_kernel_size_percentage * min(mask.shape))
-        )
-        morph_size += ~morph_size & 1  # ensure odd
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (morph_size, morph_size)
-        )
-        closed_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        # (2) Feather with Gaussian blur
-        feather_size = max(
-            3,
-            round(self.gaussian_blur_kernel_size_percentage * min(mask.shape)),
-        )
-        feather_size += ~feather_size & 1
-        feathered_mask = np.clip(
-            cv2.GaussianBlur(
-                closed_mask.astype(np.float32), (feather_size, feather_size), 0
+        # Clean mask up.
+        try:
+            mask, _ = clean_up_mask(
+                raw_mask=mask,
+                ellipse_axes_size_percentage=(
+                    self.closing_se_kernel_size_percentage,
+                    self.closing_se_kernel_size_percentage,
+                ),
+                minimum_hole_area_ratio=self.minimum_hole_area_ratio,
             )
-            / 255.0,
-            0,
-            1,
-        )
-        # Done, create MetaTensor for later resizing capability.
-        mask_visual = MetaTensor(
-            torch.from_numpy(feathered_mask).unsqueeze(0)
-        ).copy_meta_from(hist)
-        data[HistologyPipelineKeys.MASK_FOR_VISUALISATION] = mask_visual
+        except ValueError:
+            data[SharedPipelineKeys.EARLY_EXIT] = (
+                "(Histology) No contours found."
+            )
+            return data
+        # Create and store binary mask.
+        data[self.save_as] = mask.astype(bool)  # shape: (H, W)
+        # Done.
         return data
 
 
-class ObtainHaematoxylinUsingMacenkoHEStainDeconvolutiond(MapTransform):
+class DeconvolveHaematoxylinInRGBSpaced(MapTransform):
     """
     Deconvolves haematoxylin channel from an RGB histology input image using
     Macenko stain deconvolution and a binary mask to guide its statistical
     sampling for better colour accuracy.
     """
 
-    def __init__(self, darker_is_higher: bool):
+    OD_MAX = 2
+    # NOTE: OD  = -log_{10}(I / I0) = 2
+    #    => I   = exp(-2 * log(10)) * I0
+    #    => I   ~ 0.01 * I0
+    #    => 99% absorption, so mega heavy staining
+
+    def __init__(self, save_as: Hashable):
         super().__init__(
             keys=(
                 HistologyPipelineKeys.HISTOLOGY,
-                HistologyPipelineKeys.MACENKO_STAIN_DECONVOLUTION_MASK,
+                HistologyPipelineKeys.STAIN_DECONVOLUTION_TISSUE_MASK,
             ),
             allow_missing_keys=False,
         )
+        self.save_as = save_as
         self.extractor = ExtractHEStains()
-        self.darker_is_higher = darker_is_higher
 
     def __call__(self, data: dict) -> dict:
         # Obtain histology and binary mask.
         hist: MetaTensor = data[HistologyPipelineKeys.HISTOLOGY]
         mask: torch.Tensor = data[
-            HistologyPipelineKeys.MACENKO_STAIN_DECONVOLUTION_MASK
+            HistologyPipelineKeys.STAIN_DECONVOLUTION_TISSUE_MASK
         ]
         # Obtain stain matrix S.
         hist_np = hist.detach().cpu().permute(1, 2, 0).numpy()
@@ -202,13 +270,13 @@ class ObtainHaematoxylinUsingMacenkoHEStainDeconvolutiond(MapTransform):
             raise ValueError(
                 f"expected 3-channel RGB image, received {num_channels}-channel image"
             )
-        S = self.extractor(hist_np[mask])
+        S = self.extractor(hist_np[mask])  # shape: (mask.sum(), 3)
         # Convert image from RGB space to optical density (OD) space.
         ε = np.finfo(np.float32).eps
         I0 = 255
         OD = hist_np.astype(np.float32)
         OD = np.clip(OD, ε, 255)  # avoiding log(0)
-        OD = -np.log(OD / I0)
+        OD = -np.log10(OD / I0)
         OD_vec = OD.reshape(H * W, num_channels).T
         # Obtain pseudoinverse P of S.
         P = np.linalg.inv(S.T @ S) @ S.T
@@ -220,120 +288,77 @@ class ObtainHaematoxylinUsingMacenkoHEStainDeconvolutiond(MapTransform):
         red, _, blue = S
         red_blue_ratio = red / (blue + ε)
         haematoxylin_index = np.argmin(red_blue_ratio)
-        concentration = C[haematoxylin_index, :].reshape(1, H, W)
-        # Convert from OD space to RGB space.
-        concentration = np.clip(I0 * np.exp(-concentration), 0, 255)
-        if not self.darker_is_higher:
-            concentration = (
-                255 - concentration
-            )  # makes higher values appear lighter
-        concentration = concentration.astype(np.uint8)
-        # Construct MetaTensor from relevant concentration.
-        meta = deepcopy(hist.meta)
-        tensor = MetaTensor(concentration, meta=meta)
-        data[HistologyPipelineKeys.HISTOLOGY] = tensor
+        # Obtain haematoxylin image in OD space.
+        haematoxylin = C[haematoxylin_index, :].reshape(1, H, W)
+        # Clip.
+        haematoxylin = np.clip(haematoxylin, 0, self.OD_MAX)
+        # Turn to RGB.
+        haematoxylin = np.clip(I0 - I0 * np.exp(-haematoxylin), 0, I0)
+        breakpoint()
+        # Done!
+        tensor = MetaTensor(haematoxylin).copy_meta_from(hist)
+        data[self.save_as] = tensor
         return data
 
 
-class BinaryMaskFromHaematoxylind(MapTransform):
+class BinaryMasksFromHaematoxylind(MapTransform):
     """
     Builds a larger and morphologically-closed binary tissue mask from the
-    deconvolved haemtoxylin channel image.
+    deconvolved haematoxylin image, as well as a version with holes cut out
+    for visualisation purposes.
     """
 
     def __init__(
         self,
-        darker_is_higher: bool,
+        save_as: tuple[Hashable, Hashable],
         closing_se_kernel_size_percentage: Percentage,
         minimum_hole_area_ratio: StrictlyPositiveFloat,
     ):
         super().__init__(
-            keys=(HistologyPipelineKeys.HISTOLOGY), allow_missing_keys=False
+            keys=(HistologyPipelineKeys.HAEMATOXYLIN), allow_missing_keys=False
         )
-        self.darker_is_higher = darker_is_higher
+        self.save_as = save_as
         self.closing_se_kernel_size_percentage = (
             closing_se_kernel_size_percentage
         )
         self.minimum_hole_area_ratio = minimum_hole_area_ratio
+        self.otsu_prep = ScaleIntensityRangePercentiles(
+            lower=1,
+            upper=99,
+            b_min=0,
+            b_max=255,
+            clip=True,
+            dtype=np.uint8,
+        )
 
     def __call__(self, data: dict) -> dict:
-        # Obtain haematoxylin channel.
-        # NOTE: assumed to have already been written to the HISTOLOGY key,
-        #       hence the first channel is the haematoxylin channel.
-        hist: MetaTensor = data[HistologyPipelineKeys.HISTOLOGY]
-        assert hist.ndim == 3
-        haematoxylin = hist[0, :, :].numpy()  # shape: (H, W)
-        # > Stage 1: Morphologically close for initial cleanup.
-        _, raw_mask = cv2.threshold(
-            haematoxylin,
-            0,
-            255,
-            (
-                cv2.THRESH_BINARY
-                if not self.darker_is_higher
-                else cv2.THRESH_BINARY_INV
+        # Prep haematoxylin for Otsu.
+        haematoxylin = data[HistologyPipelineKeys.HAEMATOXYLIN]
+        haematoxylin_uint8: MetaTensor = self.otsu_prep(
+            haematoxylin
+        )  # pyright: ignore[reportAssignmentType]
+        haematoxylin_np = haematoxylin_uint8.squeeze().numpy()
+        # Obtain mask.
+        _, raw_mask = cv2.threshold(haematoxylin_np, 0, 255, cv2.THRESH_OTSU)
+        # Clean up.
+        try:
+            masks = clean_up_mask(
+                raw_mask=raw_mask,
+                ellipse_axes_size_percentage=(
+                    self.closing_se_kernel_size_percentage,
+                    self.closing_se_kernel_size_percentage,
+                ),
+                minimum_hole_area_ratio=self.minimum_hole_area_ratio,
             )
-            | cv2.THRESH_OTSU,
-        )
-        morph_size = max(
-            3,
-            round(self.closing_se_kernel_size_percentage * min(raw_mask.shape)),
-        )
-        morph_size += ~morph_size & 1  # ensure odd
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (morph_size, morph_size)
-        )
-        closed_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_CLOSE, kernel)
-        # > Stage 2: Contour-based hole filling.
-        contours, hierarchy = cv2.findContours(
-            closed_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
-        )
-        if not contours:
-            data[SharedPipelineKeys.EARLY_EXIT] = "no contours found"
+        except ValueError:
+            data[SharedPipelineKeys.EARLY_EXIT] = (
+                "(Histology) No contours found."
+            )
             return data
-        # (a) Find largest contour and fill it.
-        largest_contour_idx = max(
-            range(len(contours)), key=lambda i: cv2.contourArea(contours[i])
-        )
-        largest_contour = contours[largest_contour_idx]
-        filled_mask = np.zeros_like(raw_mask)
-        cv2.drawContours(
-            filled_mask,
-            [largest_contour],
-            -1,
-            color=255,  # type: ignore
-            thickness=cv2.FILLED,
-        )
-        # (b) Find child contours and erode them away
-        if self.minimum_hole_area_ratio > 0:
-            largest_area = cv2.contourArea(largest_contour)
-            if hierarchy is not None:
-                hierarchy = hierarchy[
-                    0
-                ]  # Shape: (N, 4) where columns are [Next, Previous, First_Child, Parent]
-                # Find all child contours of the largest contour
-                for i, h in enumerate(hierarchy):
-                    parent_idx = h[3]  # Parent index
-                    if parent_idx == largest_contour_idx:
-                        hole_area = cv2.contourArea(contours[i])
-                        if (
-                            hole_area / largest_area
-                            >= self.minimum_hole_area_ratio
-                        ):
-                            # Cut this hole out
-                            cv2.drawContours(
-                                filled_mask,
-                                [contours[i]],
-                                -1,
-                                color=0,  # type: ignore
-                                thickness=cv2.FILLED,
-                            )
-        # Done!
-        data[HistologyPipelineKeys.HISTOLOGY_MASK] = MetaTensor(
-            torch.from_numpy(filled_mask.astype(bool)).unsqueeze(
-                0
-            )  # shape: (1, H, W)
-        ).copy_meta_from(hist)
+        # Convert masks to [0, 1] float32 and save.
+        for mask, save_as in zip(masks, self.save_as):
+            mask = mask.astype(np.float32) / 255
+            data[save_as] = MetaTensor(mask).copy_meta_from(haematoxylin)
         return data
 
 
@@ -357,8 +382,10 @@ class ResizeAxesToIsotropicMPPd(MapTransform):
             # Get data.
             tensor: MetaTensor = data[key]
             # Determine attributes.
-            _, height, width = tensor.shape
-            batched = tensor.unsqueeze(0)
+            *_, height, width = tensor.shape
+            batched = tensor
+            while batched.ndim < 4:
+                batched = batched.unsqueeze(0)
             # Calculate indepedent scale factors.
             mpp_x = tensor.meta[HistologyMetadataKeys.ORIGINAL_MPP_X]
             mpp_y = tensor.meta[HistologyMetadataKeys.ORIGINAL_MPP_Y]
@@ -368,13 +395,7 @@ class ResizeAxesToIsotropicMPPd(MapTransform):
             new_height = round(height * scale_y)
             new_width = round(width * scale_x)
             # Resize to new dimensions.
-            if tensor.dtype is torch.uint8:
-                mi = 0
-                ma = 255
-            elif tensor.dtype is torch.bool:
-                mi = 0
-                ma = 1
-            elif tensor.dtype is torch.float32:
+            if tensor.dtype is torch.float32:
                 mi = tensor.min()
                 ma = tensor.max()
             else:
@@ -384,12 +405,10 @@ class ResizeAxesToIsotropicMPPd(MapTransform):
                 size=(new_height, new_width),
                 mode=mode,
             ).squeeze(0)
-            if not tensor.dtype.is_floating_point:
-                resized_hist = resized_hist.round()
             resized_hist = resized_hist.clamp(mi, ma).type(tensor.dtype)
             resized_hist.meta[HistologyMetadataKeys.MPP] = (
                 self.target_microns_per_pixel
             )
-            # Record transform.
+            # Done.
             data[key] = resized_hist
         return data
