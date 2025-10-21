@@ -22,7 +22,7 @@ class UnfreezeController:
         for name, param in self.model.mri_encoder.named_parameters():
             if name != "conv1":
                 param.requires_grad = False
-        for name, param in self.model.histology_encoder.named_parameters():
+        for name, param in self.model.haematoxylin_encoder.named_parameters():
             if name != "conv1":
                 param.requires_grad = False
         # MRI encoder `BatchNorm2d` (histology has none)
@@ -50,13 +50,13 @@ class UnfreezeController:
             return None
         block = self.plan[self.index]
         mri_target: nn.Module
-        hist_target: nn.Module
-        mri_target, hist_target = map(
+        haem_target: nn.Module
+        mri_target, haem_target = map(
             lambda x: getattr(x, block),
-            (self.model.mri_encoder, self.model.histology_encoder),
+            (self.model.mri_encoder, self.model.haematoxylin_encoder),
         )
         for p in mri_target.parameters():
             p.requires_grad = True
-        for q in hist_target.parameters():
+        for q in haem_target.parameters():
             q.requires_grad = True
         return block
