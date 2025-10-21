@@ -11,7 +11,7 @@ from .utils import pformat_transform
 
 from monai.data.dataset import PersistentDataset
 from monai.data.meta_tensor import MetaTensor
-from monai.transforms.compose import Compose
+from monai.transforms.transform import Transform
 
 from pathlib import Path
 from sklearn.model_selection import GroupShuffleSplit
@@ -142,7 +142,7 @@ class MultiModalDatasetView(torch.utils.data.Dataset):
         self,
         dataset: MultiModalDataset,
         indices: Sequence[int],
-        transform: Compose | None = None,
+        transform: Transform | None = None,
     ):
         self.dataset = dataset
         self.indices = list(indices)
@@ -166,7 +166,7 @@ def patient_stratified_split(
     val: Percentage,
     test: Percentage,
     seed: int | None = None,
-    train_transform: Compose | None = None,
+    train_transform: Transform | None = None,
 ) -> tuple[MultiModalDatasetView, MultiModalDatasetView, MultiModalDatasetView]:
     """Splits a dataset into train, validation, and testing subsets with the
     (approximate) desired percentages while prioritising grouping by patient
