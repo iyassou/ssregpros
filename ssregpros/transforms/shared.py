@@ -3,7 +3,7 @@ from monai.data.meta_tensor import MetaTensor
 from monai.transforms.transform import MapTransform, Transform
 
 from enum import StrEnum
-from typing import Callable
+from typing import Callable, Iterable, Hashable
 
 
 class SharedPipelineKeys(StrEnum):
@@ -46,3 +46,23 @@ class SkipIfKeysPresentd(MapTransform):
         for _ in self.key_iterator(data):
             return data
         return self.transform(data)
+
+
+class StandardiseIntensityMaskedd(MapTransform):
+    """Standardises intensity using masked statistics."""
+
+    def __init__(self, keys: Iterable[Hashable]):
+        for pair in keys:
+            if not (isinstance(pair, (tuple, list)) and len(pair) == 2):
+                raise TypeError(f"expect iterable of key pairs, not: {pair!r}")
+        super().__init__(keys=keys, allow_missing_keys=True)
+
+    def __call__(self, data: dict) -> dict:
+        for tensor_key, mask_key in self.key_iterator(data):
+            tensor = data[tensor_key]
+            mask = data[mask_key]
+            mean = tensor[mask].mean()
+            std = tensor[mask].std()
+            tensor = (tensor - mean) / std
+            data[tensor_key] = tensor
+        return data
