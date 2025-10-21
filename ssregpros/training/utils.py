@@ -1,6 +1,6 @@
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import math
 import numpy as np
@@ -86,9 +86,9 @@ def to_uint8_mask(mask: MatrixLike) -> np.ndarray:
 
 
 def validation_image_filename(
-    name: str, epoch: int, batch: int, suffix: str
-) -> str:
-    return f"{name}_batch{batch:03d}_epoch{epoch:04d}_{suffix}.png"
+    root: Path, name: str, epoch: int, batch: int, suffix: str
+) -> Path:
+    return root / f"{name}_batch{batch:03d}_epoch{epoch:04d}_{suffix}.png"
 
 
 def save_image_grid(
@@ -115,7 +115,7 @@ def save_image_grid(
 
 
 def split_weight_decay(
-    named_params: Iterator[tuple[str, torch.nn.parameter.Parameter]],
+    named_params: Iterable[tuple[str, torch.nn.parameter.Parameter]],
 ) -> tuple[
     list[torch.nn.parameter.Parameter], list[torch.nn.parameter.Parameter]
 ]:
@@ -146,3 +146,90 @@ def steps_to_epochs(
         1, math.ceil(len_dataloader / max(1, gradient_accumulation_steps))
     )
     return max(1, math.ceil(steps / steps_per_epoch))
+
+
+def pformat_transform(transform, indent=0):
+    """Recursively get string representation of a transform."""
+    indent_str = "  " * indent
+    class_name = transform.__class__.__name__
+    lines = [f"{indent_str}{class_name}("]
+    # Special handling for Compose - recursively process its transforms list
+    if hasattr(transform, "transforms") and isinstance(
+        transform.transforms, (list, tuple)
+    ):
+        lines.append(f"{indent_str}  transforms=[")
+        for i, t in enumerate(transform.transforms):
+            lines.append(f"{indent_str}    [{i}]")
+            lines.append(pformat_transform(t, indent + 3))
+        lines.append(f"{indent_str}  ]")
+        lines.append(f"{indent_str})")
+        return "\n".join(lines)
+    # Get the instance attributes (filter out private and methods, but keep transform objects)
+    attrs = {}
+    for k, v in transform.__dict__.items():
+        if k.startswith("_"):
+            continue
+        # Keep if it's not callable, OR if it looks like a transform object
+        is_transform_obj = (
+            hasattr(v, "__class__")
+            and hasattr(v, "__dict__")
+            and not isinstance(v, (str, int, float, bool, type(None)))
+        )
+        if not callable(v) or is_transform_obj:
+            attrs[k] = v
+    for k, v in attrs.items():
+        # Check if value is a transform (has __dict__ and looks like a class instance)
+        is_transform = (
+            hasattr(v, "__class__")
+            and hasattr(v, "__dict__")
+            and not isinstance(v, (str, int, float, bool, type(None)))
+        )
+        if is_transform:
+            try:
+                # Try to detect if it's a MONAI/custom transform by checking module or common attributes
+                module = getattr(v, "__module__", "")
+                is_likely_transform = (
+                    module.startswith("monai.")
+                    or module.startswith("ssregpros.")
+                    or hasattr(v, "transforms")
+                    or "transform" in k.lower()
+                )
+                if is_likely_transform:
+                    # Recursively handle nested transform
+                    lines.append(f"{indent_str}  {k}=")
+                    lines.append(pformat_transform(v, indent + 2))
+                else:
+                    lines.append(f"{indent_str}  {k}={repr(v)}")
+            except Exception as e:
+                # Fallback to repr if something goes wrong
+                lines.append(f"{indent_str}  {k}={repr(v)}")
+        elif isinstance(v, (list, tuple)) and v:
+            # Handle lists/tuples that might contain transforms
+            try:
+                has_transforms = any(
+                    hasattr(item, "__class__")
+                    and hasattr(item, "__dict__")
+                    and not isinstance(item, (str, int, float, bool))
+                    for item in v
+                )
+                if has_transforms:
+                    lines.append(f"{indent_str}  {k}=[")
+                    for item in v:
+                        if (
+                            hasattr(item, "__class__")
+                            and hasattr(item, "__dict__")
+                            and not isinstance(item, (str, int, float, bool))
+                        ):
+                            lines.append(pformat_transform(item, indent + 2))
+                        else:
+                            lines.append(f"{indent_str}    {repr(item)}")
+                    lines.append(f"{indent_str}  ]")
+                else:
+                    lines.append(f"{indent_str}  {k}={repr(v)}")
+            except Exception:
+                lines.append(f"{indent_str}  {k}={repr(v)}")
+        else:
+            # Regular attribute
+            lines.append(f"{indent_str}  {k}={repr(v)}")
+    lines.append(f"{indent_str})")
+    return "\n".join(lines)
