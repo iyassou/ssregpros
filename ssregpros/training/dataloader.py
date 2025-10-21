@@ -1,23 +1,25 @@
 from ..transforms.histology import HistologyPipelineKeys as HKeys
 from ..transforms.mri import MriPipelineKeys as MKeys
-from ..transforms.preprocessor import PREPROCESSOR_PIPELINE_KEYS as PKeys
+from ..transforms.preprocessor import PreprocessorPipelineKeys as PKeys
 from .dataset import (
     MultiModalDataset as Dataset,
     MultiModalDatasetView as DatasetView,
 )
 
-from monai.data.meta_tensor import MetaTensor
 from torch.utils.data.dataloader import DataLoader, default_collate
 from typing import NamedTuple
+
+import torch
 
 
 class MultiModalPersistentDataLoaderOutput(NamedTuple):
     correspondence_id: tuple[str]
-    mri: MetaTensor
-    mri_mask: MetaTensor
-    histology: list[MetaTensor]
-    histology_mask: list[MetaTensor]
-    histology_rgb: list[MetaTensor] | None
+    mri: torch.Tensor
+    mri_mask: torch.Tensor
+    haematoxylin: list[torch.Tensor]
+    haematoxylin_mask: list[torch.Tensor]
+    histology: list[torch.Tensor] | None
+    histology_mask: list[torch.Tensor] | None
 
 
 class MultiModalPersistentDataLoaderCollator:
@@ -30,17 +32,12 @@ class MultiModalPersistentDataLoaderCollator:
         self, batch: list[dict]
     ) -> MultiModalPersistentDataLoaderOutput:
         """Collates dictionary inputs coming from the preprocessing pipeline
-        into a standardised named tuple.
-
-        Notes
-        -----
-        The histology mask and RGB images are cast to torch.float32 here.
-        VERY important."""
+        into a standardised named tuple."""
         # Collate the correspondences representations, MRI slices,
         # and mask slices in the usual way.
         corrs: tuple[str]
-        mri: MetaTensor
-        mri_mask: MetaTensor
+        mri: torch.Tensor
+        mri_mask: torch.Tensor
         corrs, mri, mri_mask = map(
             default_collate,
             zip(
@@ -48,37 +45,41 @@ class MultiModalPersistentDataLoaderCollator:
                     (
                         str(d[PKeys.CORRESPONDENCE]),
                         d[MKeys.MRI_SLICE],
-                        d[MKeys.MRI_MASK_SLICE],
+                        d[MKeys.MASK_SLICE],
                     )
                     for d in batch
                 )
             ),  # pyright: ignore[reportArgumentType]
         )
-        # Collate variable-sized histology images and their masks into lists
-        # of MetaTensors.
-        histology: list[MetaTensor]
-        histology_mask: list[MetaTensor]
-        histology, histology_mask = zip(
+        # Collate variable-sized haematoxylin images and their masks into lists
+        # of tensors.
+        haematoxylin: list[torch.Tensor]
+        haematoxylin_mask: list[torch.Tensor]
+        haematoxylin, haematoxylin_mask = zip(
             *[
-                (d[HKeys.HISTOLOGY], d[HKeys.HISTOLOGY_MASK].float())
+                (d[HKeys.HAEMATOXYLIN], d[HKeys.HAEMATOXYLIN_MASK])
                 for d in batch
             ]
         )  # pyright: ignore[reportAssignmentType]
-        histology_rgb: list[MetaTensor] | None
+        # Collate visualisation-only tensors.
+        histology: list[torch.Tensor] | None
+        histology_mask: list[torch.Tensor] | None
         if self.visualisation:
-            histology_rgb = [
-                d[HKeys.HISTOLOGY_FOR_VISUALISATION].float() for d in batch
-            ]
+            histology, histology_mask = zip(
+                *[(d[HKeys.HISTOLOGY], d[HKeys.HISTOLOGY_MASK]) for d in batch]
+            )  # pyright: ignore[reportAssignmentType]
         else:
-            histology_rgb = None
+            histology = None
+            histology_mask = None
         # Done.
         return MultiModalPersistentDataLoaderOutput(
             correspondence_id=corrs,
             mri=mri,
             mri_mask=mri_mask,
+            haematoxylin=haematoxylin,
+            haematoxylin_mask=haematoxylin_mask,
             histology=histology,
             histology_mask=histology_mask,
-            histology_rgb=histology_rgb,
         )
 
 
