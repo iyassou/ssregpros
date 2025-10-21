@@ -1,4 +1,4 @@
-from monai.data.meta_tensor import MetaTensor
+from ..models.registration import RegistrationNetwork, RegistrationNetworkOutput
 
 from enum import StrEnum
 from typing import NamedTuple
@@ -23,9 +23,110 @@ class CannyTolerantOverlayOutput(NamedTuple):
     symmetric_coverage: torch.Tensor
 
 
+class QualitativeVisuals(NamedTuple):
+    warped_histology: torch.Tensor
+    # Warped RGB histology.
+
+    warped_histology_mask: torch.Tensor
+    # Warped histology mask, has holes.
+
+    checkerboard: torch.Tensor
+    # Checkerboard overlay
+
+    canny_band: CannyTolerantOverlayOutput
+    # Band-gated Canny overlay
+
+    canny_mask: CannyTolerantOverlayOutput
+    # Mask-gated Canny overlay
+
+
+def generate_qualitative_visuals(
+    model: RegistrationNetwork,
+    pred: RegistrationNetworkOutput,
+    mri: torch.Tensor,
+    mri_mask: torch.Tensor,
+    histology: list[torch.Tensor],
+    histology_mask: list[torch.Tensor],
+    canny_band_sigma: float,
+    display_in_clinical_convention: bool,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    CannyTolerantOverlayOutput,
+    CannyTolerantOverlayOutput,
+]:
+    """
+    Generate qualitative visualisations using "red" for MRI and "green" for histology.
+
+    Notes
+    -----
+    Reminder: `histology_mask` is the mask with punctures as identified by the
+    histology preprocessing pipeline.
+    The histology mask is used for the checkerboard overlay, but the haematoxylin,
+    read "whole", mask is used for the gated Canny overlays.
+
+    Returns
+    -------
+    QualitativeVisuals
+    """
+    # Generate warped RGB histology and its mask for visuals.
+    warped_histology = model.apply_rigid_transform(
+        pred.thetas,
+        histology,
+        grid_sampling_mode="bilinear",
+    )
+    warped_histology_mask = model.apply_rigid_transform(
+        pred.thetas,
+        histology_mask,
+        grid_sampling_mode="nearest",
+    )
+    # Checkerboard overlay.
+    checkerboard = checkerboard_overlay(
+        mri_batch=mri,
+        mri_mask_batch=mri_mask,
+        warped_histology_rgb_batch=warped_histology,
+        warped_histology_mask_batch=warped_histology_mask,
+        patch_size=16,
+        mri_kernel_size=5,
+        mri_border_colour=(1, 0, 0),
+        histology_kernel_size=3,
+        histology_border_colour=(0, 1, 0),
+        display_in_clinical_convention=display_in_clinical_convention,
+    )
+    # Band-gated Canny overlay.
+    canny_band = canny_tolerant_overlay(
+        mri_batch=mri,
+        mri_mask_batch=mri_mask,
+        warped_haematoxylin_batch=pred.warped_haematoxylin,
+        warped_haematoxylin_mask_batch=pred.warped_haematoxylin_mask,
+        sigma_px=canny_band_sigma,
+        mode=GateEdgesMode.BAND,
+        display_in_clinical_convention=display_in_clinical_convention,
+    )
+    # Mask-gated Canny overlay.
+    canny_mask = canny_tolerant_overlay(
+        mri_batch=mri,
+        mri_mask_batch=mri_mask,
+        warped_haematoxylin_batch=pred.warped_haematoxylin,
+        warped_haematoxylin_mask_batch=pred.warped_haematoxylin_mask,
+        sigma_px=canny_band_sigma,
+        mode=GateEdgesMode.MASK,
+        display_in_clinical_convention=display_in_clinical_convention,
+    )
+    # Done!
+    return QualitativeVisuals(
+        warped_histology=warped_histology,
+        warped_histology_mask=warped_histology_mask,
+        checkerboard=checkerboard,
+        canny_band=canny_band,
+        canny_mask=canny_mask,
+    )
+
+
 def checkerboard_overlay(
-    mri_batch: MetaTensor | torch.Tensor,
-    mri_mask_batch: MetaTensor | torch.Tensor,
+    mri_batch: torch.Tensor | torch.Tensor,
+    mri_mask_batch: torch.Tensor | torch.Tensor,
     warped_histology_rgb_batch: torch.Tensor,
     warped_histology_mask_batch: torch.Tensor,
     patch_size: int,
@@ -43,11 +144,11 @@ def checkerboard_overlay(
     mri_batch: torch.Tensor
         Shape (B, 1, H, W), values in [0, 1], torch.float32
     mri_mask_batch: torch.Tensor
-        Shape (B, 1, H, W), values in {0, 1}, torch.bool
+        Shape (B, 1, H, W), values in {0, 1}, torch.float32
     warped_histology_rgb_batch: torch.Tensor
-        Shape (B, 3, H, W), values in [0, 255], torch.uint8
+        Shape (B, 3, H, W), values in [0, 1], torch.float32
     warped_histology_mask_batch: torch.Tensor
-        Shape (B, 1, H, W), values in {0, 1}, torch.bool
+        Shape (B, 1, H, W), values in {0, 1}, torch.float32
     patch_size: int
         The size of each square in the checkerboard.
     mri_kernel_size: int
@@ -86,17 +187,18 @@ def checkerboard_overlay(
     ) % 2 == 1  # shape: (H, W)
     checkerboard_mask = mask_2d.unsqueeze(0).unsqueeze(0)  # shape: (1, 1, H, W)
     # Convert MRI to 3-channel grayscale.
-    mri_rgb = (mri_batch * 255).type(torch.uint8).repeat(1, 3, 1, 1)
+    mri_rgb = mri_batch.repeat(1, 3, 1, 1)
     # Create alpha mask from tissue mask.
-    alpha_mask = warped_histology_mask_batch.float().repeat(1, 3, 1, 1)
+    alpha_mask = warped_histology_mask_batch.repeat(1, 3, 1, 1)
     # Three-way combination logic.
     # NOTE: where the checkerboard is "off" for histology, blend
     #       the histology and MRI using the tissue alpha mask
     blended = (
         alpha_mask * warped_histology_rgb_batch + (1 - alpha_mask) * mri_rgb
     )
-    overlay = torch.where(~checkerboard_mask, blended, mri_rgb)
-    overlay /= 255.0  # shape: (B, 3, H, W)
+    overlay = torch.where(
+        ~checkerboard_mask, blended, mri_rgb
+    )  # shape: (B, 3, H, W)
     # =========================================================================
     # Draw MRI border.
     overlay = _mask_border_overlay(
@@ -120,10 +222,10 @@ def checkerboard_overlay(
 
 
 def canny_tolerant_overlay(
-    mri_batch: MetaTensor,
-    mri_mask_batch: MetaTensor,
-    warped_histology_batch: torch.Tensor,
-    warped_histology_mask_batch: torch.Tensor,
+    mri_batch: torch.Tensor,
+    mri_mask_batch: torch.Tensor,
+    warped_haematoxylin_batch: torch.Tensor,
+    warped_haematoxylin_mask_batch: torch.Tensor,
     sigma_px: float,
     mode: GateEdgesMode,
     band_factor: float = 1.96,
@@ -139,11 +241,11 @@ def canny_tolerant_overlay(
     mri_batch: torch.Tensor
         Shape (B, 1, H, W), values in [0, 1], torch.float32
     mri_mask_batch: torch.Tensor
+        Shape (B, 1, H, W), values in {0, 1}, torch.float32
+    warped_haematoxylin_batch: torch.Tensor
         Shape (B, 1, H, W), values in [0, 1], torch.float32
-    warped_histology_batch: torch.Tensor
+    warped_haematoxylin_mask_batch: torch.Tensor
         Shape (B, 1, H, W), values in [0, 1], torch.float32
-    warped_histology_mask_batch: torch.Tensor
-        Shape (B, 1, H, W), values in {0, 1}, torch.bool
     sigma_px: float
         Boundary uncertainty model sigma
     mode: GateEdgesMode, default GateEdgesMode.BAND
@@ -167,17 +269,23 @@ def canny_tolerant_overlay(
         torch.Tensor
             Symmetric coverage
     """
+    # Normalise images for edge detection.
+    mri = mri_batch / mri_batch[mri_mask_batch > 0.5].max()
+    hist = (
+        warped_haematoxylin_batch
+        / warped_haematoxylin_batch[warped_haematoxylin_mask_batch > 0.5].max()
+    )
     # Obtain Canny edges.
     canny = kornia.filters.Canny(low_threshold=0.2, high_threshold=0.8)
-    mri_edges, _ = canny(mri_batch)
-    hist_edges, _ = canny(warped_histology_batch)
+    mri_edges, _ = canny(mri)
+    hist_edges, _ = canny(hist)
     # Calculate radii from sigma.
     r_band = max(1, math.ceil(band_factor * sigma_px))
     r_tol = max(1, math.ceil(tol_factor * sigma_px))
     # Gate edges.
     gated_mri_edges = _gate_edges(mri_edges, mri_mask_batch, r_band, mode)
     gated_hist_edges = _gate_edges(
-        hist_edges, warped_histology_mask_batch, r_band, mode
+        hist_edges, warped_haematoxylin_mask_batch, r_band, mode
     )
     # Perform tolerance-aware matching in both directions.
     mri_matches = _matches_within_tolerance(
@@ -218,14 +326,14 @@ def canny_tolerant_overlay(
 
 
 def clinical_convention(
-    x: MetaTensor | torch.Tensor,
-) -> MetaTensor | torch.Tensor:
+    x: torch.Tensor | torch.Tensor,
+) -> torch.Tensor | torch.Tensor:
     """
     Displays the assumed RAS orientation tensor in clinical convention.
 
     Parameters
     ----------
-    x: MetaTensor | torch.Tensor
+    x: torch.Tensor | torch.Tensor
         Shape (*_, H, W)
 
     Notes
@@ -249,7 +357,7 @@ def _mask_border_overlay(
     canvas_batch: torch.Tensor
         Shape (B, 3, H, W), values in [0, 1], torch.float32
     mask_batch: torch.Tensor
-        Shape (B, 1, H, W), values in {0, 1}, torch.bool
+        Shape (B, 1, H, W), values in {0, 1}, torch.float32
     kernel_size: int
         Roughly translates to border thickness.
     colour: RGB
@@ -301,8 +409,8 @@ def _gate_edges(
     if mode == GateEdgesMode.BAND:
         # Build annulus.
         se = _disk_kernel(r_band, device=mask.device)
-        dil = morphology.dilation(mask.float(), se)
-        ero = morphology.erosion(mask.float(), se)
+        dil = morphology.dilation(mask, se)
+        ero = morphology.erosion(mask, se)
         band = (dil > 0.5) & (ero <= 0.5)
         band = band.float()
         # Gate.
