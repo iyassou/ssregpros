@@ -28,6 +28,10 @@ from .early_stopping import EarlyStopping, EarlyStoppingMode
 from .icebreaker import UnfreezeController
 from .logging import TableIdentifiers as LoggingTableIDs
 from .logging.base_logger import BaseLogger
+from .qualitative import (
+    clinical_convention,
+    generate_qualitative_visuals,
+)
 from .scheduler import Scheduler
 from .utils import (
     MetricAverager,
@@ -35,12 +39,6 @@ from .utils import (
     split_weight_decay,
     steps_to_epochs,
     validation_image_filename,
-)
-from .qualitative import (
-    GateEdgesMode,
-    canny_tolerant_overlay,
-    checkerboard_overlay,
-    clinical_convention,
 )
 
 from dataclasses import asdict, dataclass, fields
@@ -140,9 +138,8 @@ def train_for_one_epoch(
     metric_averager: MetricAverager,
     gradient_accumulation_steps: StrictlyPositiveInteger,
     gradient_max_norm: float,
-) -> dict[str, float]:
-    """Trains the registration network for a single epoch on the supplied
-    DataLoader and returns the mean loss."""
+):
+    """Trains the registration network for a single epoch."""
     # Ensure weights are updatable.
     model.train()
     # Zero optimiser gradients.
@@ -156,32 +153,20 @@ def train_for_one_epoch(
     ):
         mri_batch = dl_output.mri
         mri_mask_batch = dl_output.mri_mask
-        histology_list = dl_output.histology
-        histology_mask_list = dl_output.histology_mask
-        # Get model prediction, inject noise.
-        # TODO: inject noise
-        parameters = model.predict_rigid_transform_parameters(
-            mri_batch, histology_list
-        )
-        thetas = model.stn.build_theta(parameters)
-        pred = RegistrationNetworkOutput(
-            warped_histology_batch=model.apply_rigid_transform(
-                thetas, tensors=histology_list, grid_sampling_mode="bilinear"
-            ),
-            warped_histology_mask_batch=model.apply_rigid_transform(
-                thetas,
-                tensors=histology_mask_list,
-                grid_sampling_mode="bilinear",
-            ),
-            parameters=parameters,
-            thetas=thetas,
+        haematoxylin = dl_output.haematoxylin
+        haematoxylin_mask = dl_output.haematoxylin_mask
+        # Get model prediction.
+        pred: RegistrationNetworkOutput = model.forward(
+            mri_batch=mri_batch,
+            haematoxylin_list=haematoxylin,
+            haematoxylin_mask_list=haematoxylin_mask,
         )
         # Compute and record loss.
-        loss: torch.Tensor = loss_function(
+        loss: torch.Tensor = loss_function.forward(
             y_true=mri_batch, pred=pred, mask=mri_mask_batch
         )
         metric_averager.update(
-            **{f"train/{k}": v for k, v in loss_function.latest.items()}
+            **{f"train/{k}": v for k, v in loss_function.latest().items()}
         )
         # Backpropagate.
         (loss / gradient_accumulation_steps).backward()
@@ -199,10 +184,9 @@ def train_for_one_epoch(
             optimiser.step()
             # Zero gradients.
             optimiser.zero_grad()
-    # Return mean metrics.
-    return metric_averager.mean()
 
 
+@torch.no_grad()
 def evaluate(
     model: RegistrationNetwork,
     dataloader: MMPDataLoader,
@@ -211,207 +195,127 @@ def evaluate(
     dice_metric: DiceMetric,
     epoch: int,
     save_to_disk: tuple[str, Path, Path, Path] | None,
-) -> tuple[dict[str, float], list[dict[str, Any]]]:
+) -> list[dict[str, Any]]:
     """Evaluates the model's performance on the supplied DataLoader and
-    returns the mean metrics and qualitative visualisations."""
+    returns the qualitative visualisations."""
     # Ensure weights don't update.
     model.eval()
     # Reset metric averager.
     metric_averager.reset()
     # Prepare table rows.
     table_rows: list[dict[str, Any]] = []
-    # Run validation.
-    with torch.no_grad():
-        dl_output: MMPDLOutput
-        for batch, dl_output in tqdm.tqdm(
-            enumerate(dataloader), desc="Validation", total=len(dataloader)
-        ):
-            # Unload dataloader.
-            ids = dl_output.correspondence_id
-            mri_batch = dl_output.mri
-            mri_mask_batch = dl_output.mri_mask
-            histology_list = dl_output.histology
-            histology_mask_list = dl_output.histology_mask
-            histology_rgb_list = dl_output.histology_rgb
-            assert histology_rgb_list is not None
-            # Get prediction.
-            pred: RegistrationNetworkOutput = model(
-                mri_batch, histology_list, histology_mask_list
-            )
-            # Compute and record loss.
-            loss_function(y_true=mri_batch, pred=pred, mask=mri_mask_batch)
-            dice: torch.Tensor = dice_metric(
-                mri_mask_batch, pred.warped_histology_mask_batch
-            )  # pyright: ignore[reportAssignmentType]
-            metric_averager.update(
-                **(
-                    {f"val/{k}": v for k, v in loss_function.latest.items()}
-                    | {"val/dice": dice.mean().item()}
-                )
-            )
-            # Qualitative results.
-            # > Warp RGB images and their masks.
-            warped_histology_rgb_batch = model.apply_rigid_transform(
-                pred.thetas,
-                histology_rgb_list,
-                grid_sampling_mode="bilinear",
-            ).type(torch.uint8)
-            warped_histology_mask_batch = model.apply_rigid_transform(
-                pred.thetas,
-                dl_output.histology_mask,
-                grid_sampling_mode="nearest",
-            ).type(torch.bool)
-            # > Checkerboard overlay.
-            checkerboard_batch = checkerboard_overlay(
-                mri_batch=mri_batch,
-                mri_mask_batch=mri_mask_batch,
-                warped_histology_rgb_batch=warped_histology_rgb_batch,
-                warped_histology_mask_batch=warped_histology_mask_batch,
-                patch_size=16,
-                mri_kernel_size=5,
-                mri_border_colour=(1, 0, 0),
-                histology_kernel_size=3,
-                histology_border_colour=(0, 1, 0),
-                display_in_clinical_convention=True,
-            )
-            # > Band-gated Canny overlay.
-            canny_band_batch = canny_tolerant_overlay(
-                mri_batch,
-                mri_mask_batch,
-                pred.warped_histology_batch,
-                warped_histology_mask_batch,
-                sigma_px=loss_function.boundary_heatmap.sigma,
-                mode=GateEdgesMode.BAND,
-                display_in_clinical_convention=True,
-            )
-            metric_averager.update(
-                **{
-                    "val/canny_band_mri_coverage": canny_band_batch.mri_coverage.mean().item(),
-                    "val/canny_band_histology_coverage": canny_band_batch.histology_coverage.mean().item(),
-                    "val/canny_band_symmetric_coverage": canny_band_batch.symmetric_coverage.mean().item(),
+    # Unload dataloader.
+    dl_output: MMPDLOutput
+    for batch, dl_output in tqdm.tqdm(
+        enumerate(dataloader), desc="Validation", total=len(dataloader)
+    ):
+        mri_batch = dl_output.mri
+        mri_mask_batch = dl_output.mri_mask
+        haematoxylin = dl_output.haematoxylin
+        haematoxylin_mask = dl_output.haematoxylin_mask
+        histology = dl_output.histology
+        histology_mask = dl_output.histology_mask
+        assert histology is not None
+        assert histology_mask is not None
+        # Get prediction.
+        pred: RegistrationNetworkOutput = model.forward(
+            mri_batch=mri_batch,
+            haematoxylin_list=haematoxylin,
+            haematoxylin_mask_list=haematoxylin_mask,
+        )
+        # Compute and record loss.
+        loss_function(y_true=mri_batch, pred=pred, mask=mri_mask_batch)
+        # Compute Dice score between MRI and haematoxylin masks.
+        dice: float = (
+            dice_metric(mri_mask_batch, pred.warped_haematoxylin_mask)
+            .mean()  # pyright: ignore[reportAttributeAccessIssue]
+            .item()
+        )
+        metric_averager.update(
+            **{
+                f"val/{k}": v
+                for k, v in (loss_function.latest() | {"dice": dice}).items()
+            }
+        )
+        # Qualitative results.
+        (
+            warped_histology,
+            warped_histology_mask,
+            checkerboard,
+            canny_band,
+            canny_mask,
+        ) = generate_qualitative_visuals(
+            model=model,
+            pred=pred,
+            mri=mri_batch,
+            mri_mask=mri_mask_batch,
+            histology=histology,
+            histology_mask=histology_mask,
+            canny_band_sigma=loss_function.boundary_heatmap.sigma,
+            display_in_clinical_convention=True,
+        )
+        # Add visual metrics.
+        metric_averager.update(
+            **{
+                "val/canny_band_mri_coverage": canny_band.mri_coverage.mean().item(),
+                "val/canny_band_histology_coverage": canny_band.histology_coverage.mean().item(),
+                "val/canny_band_symmetric_coverage": canny_band.symmetric_coverage.mean().item(),
+                # =========================================================
+                "val/canny_mask_mri_coverage": canny_mask.mri_coverage.mean().item(),
+                "val/canny_mask_histology_coverage": canny_mask.histology_coverage.mean().item(),
+                "val/canny_mask_symmetric_coverage": canny_mask.symmetric_coverage.mean().item(),
+            }
+        )
+        # Build qualitative results table.
+        cc_mri = clinical_convention(mri_batch)
+        cc_mri_mask = clinical_convention(mri_mask_batch)
+        cc_warped_histology = clinical_convention(warped_histology)
+        cc_warped_histology_mask = clinical_convention(warped_histology_mask)
+        for j, id_ in enumerate(dl_output.correspondence_id):
+            table_rows.append(
+                {
+                    LoggingTableIDs.ID.value: id_,
+                    LoggingTableIDs.MRI.value: cc_mri[j],
+                    LoggingTableIDs.MRI_MASK.value: cc_mri_mask[j],
+                    LoggingTableIDs.HISTOLOGY.value: cc_warped_histology[j],
+                    LoggingTableIDs.HISTOLOGY_MASK.value: cc_warped_histology_mask[
+                        j
+                    ],
+                    LoggingTableIDs.CHECKERBOARD.value: checkerboard[j],
+                    LoggingTableIDs.CANNY_BAND.value: canny_band.overlay[j],
+                    LoggingTableIDs.CANNY_MASK.value: canny_mask.overlay[j],
                 }
             )
-            # > Mask-gated Canny overlay.
-            canny_mask_batch = canny_tolerant_overlay(
-                mri_batch,
-                mri_mask_batch,
-                pred.warped_histology_batch,
-                warped_histology_mask_batch,
-                sigma_px=loss_function.boundary_heatmap.sigma,
-                mode=GateEdgesMode.MASK,
-                display_in_clinical_convention=True,
-            )
-            metric_averager.update(
-                **{
-                    "val/canny_mask_mri_coverage": canny_mask_batch.mri_coverage.mean().item(),
-                    "val/canny_mask_histology_coverage": canny_mask_batch.histology_coverage.mean().item(),
-                    "val/canny_mask_symmetric_coverage": canny_mask_batch.symmetric_coverage.mean().item(),
-                }
-            )
-            # > Create table rows.
-            cc_mri_batch = clinical_convention(mri_batch)
-            cc_mri_mask_batch = clinical_convention(mri_mask_batch)
-            cc_pred_warped_histology_batch = clinical_convention(
-                pred.warped_histology_batch
-            )
-            cc_pred_warped_histology_mask_batch = clinical_convention(
-                pred.warped_histology_mask_batch
-            )
-            for j, id_ in enumerate(ids):
-                table_rows.append(
-                    {
-                        LoggingTableIDs.ID.value: id_,
-                        LoggingTableIDs.MRI.value: cc_mri_batch[j],
-                        LoggingTableIDs.MRI_MASK.value: cc_mri_mask_batch[j],
-                        LoggingTableIDs.HISTOLOGY.value: cc_pred_warped_histology_batch[
-                            j
-                        ],
-                        LoggingTableIDs.HISTOLOGY_MASK.value: cc_pred_warped_histology_mask_batch[
-                            j
-                        ],
-                        LoggingTableIDs.CHECKERBOARD.value: checkerboard_batch[
-                            j
-                        ],
-                        LoggingTableIDs.CANNY_BAND.value: canny_band_batch.overlay[
-                            j
-                        ],
-                        LoggingTableIDs.CANNY_MASK.value: canny_mask_batch.overlay[
-                            j
-                        ],
-                    }
+        # > Save to disk?
+        if save_to_disk is None:
+            continue
+        suffix, checkerboard_dir, canny_band_dir, canny_mask_dir = save_to_disk
+        hist_dir = checkerboard_dir.parent / "hist"
+        hist_dir.mkdir(exist_ok=True, parents=True)
+        args: list[tuple[Path, str, torch.Tensor]] = [
+            (hist_dir, "warped_hist", cc_warped_histology),
+            (hist_dir, "warped_hist_mask", cc_warped_histology_mask),
+            (checkerboard_dir, "checkerboard", checkerboard),
+            (canny_band_dir, "canny_band", canny_band.overlay),
+            (canny_mask_dir, "canny_mask", canny_mask.overlay),
+        ]
+        if epoch == 1:
+            root = checkerboard_dir.parent  # wlog
+            args.extend(
+                (
+                    (root, "mri", cc_mri),
+                    (root, "mri_mask", cc_mri_mask),
                 )
-            # > Save to disk?
-            if save_to_disk is None:
-                continue
-            suffix, checkerboard_dir, canny_band_dir, canny_mask_dir = (
-                save_to_disk
             )
-
-            # >>>> MONKEY PATCHING IN
-            if epoch == 1:
-                root = checkerboard_dir.parent  # "wlog"
-                save_image_grid(
-                    cc_mri_batch,
-                    root
-                    / validation_image_filename(
-                        name="mri", epoch=epoch, batch=batch, suffix=suffix
-                    ),
-                )
-                save_image_grid(
-                    cc_mri_mask_batch.float(),
-                    root
-                    / validation_image_filename(
-                        name="mri_mask", epoch=epoch, batch=batch, suffix=suffix
-                    ),
-                )
-            hist_dir = checkerboard_dir.parent / "hist"
-            hist_dir.mkdir(exist_ok=True, parents=True)
+        for root, name, tensor in args:
             save_image_grid(
-                clinical_convention(warped_histology_rgb_batch.float() / 255),
-                hist_dir
-                / validation_image_filename(
-                    name="warped_hist", epoch=epoch, batch=batch, suffix=suffix
-                ),
-            )
-            save_image_grid(
-                clinical_convention(warped_histology_mask_batch.float()),
-                hist_dir
-                / validation_image_filename(
-                    name="warped_hist_mask",
-                    epoch=epoch,
-                    batch=batch,
-                    suffix=suffix,
-                ),
-            )
-
-            # >>>> MONKEY PATCHING OUT
-
-            # >> Checkerboard
-            save_image_grid(
-                checkerboard_batch,
-                checkerboard_dir
-                / validation_image_filename(
-                    name="checkerboard", epoch=epoch, batch=batch, suffix=suffix
-                ),
-            )
-            # >> Canny band overlay
-            save_image_grid(
-                canny_band_batch.overlay,
-                canny_band_dir
-                / validation_image_filename(
-                    name="canny_band", epoch=epoch, batch=batch, suffix=suffix
-                ),
-            )
-            # >> Canny mask overlay
-            save_image_grid(
-                canny_mask_batch.overlay,
-                canny_mask_dir
-                / validation_image_filename(
-                    name="canny_mask", epoch=epoch, batch=batch, suffix=suffix
+                tensor,
+                validation_image_filename(
+                    root, name=name, epoch=epoch, batch=batch, suffix=suffix
                 ),
             )
     # Return mean loss value.
-    return metric_averager.mean(), table_rows
+    return table_rows
 
 
 def train_model(
@@ -538,10 +442,12 @@ def train_model(
         # ========== [Phase A] ==========================================================
         set_deterministic_seed(training_config.seed)
         # > Build optimiser parameter groups.
-        lp_params = filter(
-            lambda tup: "_encoder.conv1" in tup[0]
-            or "regression_head" in tup[0],
-            model.named_parameters(),
+        lp_params = list(
+            filter(
+                lambda tup: "_encoder.conv1" in tup[0]
+                or "regression_head" in tup[0],
+                model.named_parameters(),
+            )
         )
         if training_config.lp_weight_decay:
             decay, no_decay = split_weight_decay(lp_params)
@@ -572,7 +478,7 @@ def train_model(
         # > Train.
         for epoch in range(1, training_config.lp_max_epochs + 1):
             # Train for one epoch.
-            training_metrics = train_for_one_epoch(
+            train_for_one_epoch(
                 model=model,
                 dataloader=training_dataloader,
                 optimiser=optimiser,
@@ -581,8 +487,9 @@ def train_model(
                 gradient_accumulation_steps=training_config.gradient_accumulation_steps,
                 gradient_max_norm=training_config.gradient_max_norm,
             )
+            training_metrics = training_metric_averager.mean()
             # Validate.
-            validation_metrics, validation_table_rows = evaluate(
+            validation_table_rows = evaluate(
                 model=model,
                 dataloader=validation_dataloader,
                 loss_function=loss_function,
@@ -591,6 +498,7 @@ def train_model(
                 epoch=epoch,
                 save_to_disk=("lp", *save_to_disk) if save_to_disk else None,
             )
+            validation_metrics = validation_metric_averager.mean()
             # Log.
             if verbose:
                 print(
@@ -650,10 +558,12 @@ def train_model(
         if thawer.next() is None:
             raise RuntimeError("Failed to perform initial unfreezing!")
         # > Build optimiser parameter groups.
-        ft_params = filter(
-            lambda tup: "_encoder.conv1" in tup[0]
-            or "regression_head" in tup[0],
-            model.named_parameters(),
+        ft_params = list(
+            filter(
+                lambda tup: "_encoder.conv1" in tup[0]
+                or "regression_head" in tup[0],
+                model.named_parameters(),
+            )
         )
         if training_config.ft_weight_decay:
             decay, no_decay = split_weight_decay(ft_params)
@@ -684,9 +594,11 @@ def train_model(
             training_config.ft_unfreeze_plan,
             training_config.ft_unfreeze_learning_rate_multipliers,
         ):
-            params = filter(
-                lambda tup: f"_encoder.{layer}" in tup[0],
-                model.named_parameters(),
+            params = list(
+                filter(
+                    lambda tup: f"_encoder.{layer}" in tup[0],
+                    model.named_parameters(),
+                )
             )
             if training_config.ft_weight_decay:
                 decay, no_decay = split_weight_decay(params)
@@ -719,7 +631,7 @@ def train_model(
         # > Train.
         for epoch in range(1, training_config.ft_max_epochs + 1):
             # Train for one epoch.
-            training_metrics = train_for_one_epoch(
+            train_for_one_epoch(
                 model=model,
                 dataloader=training_dataloader,
                 optimiser=optimiser,
@@ -728,8 +640,9 @@ def train_model(
                 gradient_accumulation_steps=training_config.gradient_accumulation_steps,
                 gradient_max_norm=training_config.gradient_max_norm,
             )
+            training_metrics = training_metric_averager.mean()
             # Validate.
-            validation_metrics, validation_table_rows = evaluate(
+            validation_table_rows = evaluate(
                 model=model,
                 dataloader=validation_dataloader,
                 loss_function=loss_function,
@@ -738,6 +651,7 @@ def train_model(
                 epoch=LAST_LP_EPOCH + epoch,
                 save_to_disk=("ft", *save_to_disk) if save_to_disk else None,
             )
+            validation_metrics = validation_metric_averager.mean()
             # Log.
             if verbose:
                 print(
@@ -859,17 +773,17 @@ def main():
     val = DatasetView(dataset, indices=range(len(dataset)))
 
     # Create data loaders.
-    BATCH_SIZE = 1
+    BATCH_SIZE = 4
     train_dl = MMPDataLoader(train, visualisation=False, batch_size=BATCH_SIZE)
     val_dl = MMPDataLoader(val, visualisation=True, batch_size=len(val))
 
     # Create model config.
     model_config = RegistrationNetworkConfig(
         seed=SEED,
-        height=preproc.config.mri_patch_size,
-        width=preproc.config.mri_patch_size,
-        model_name="resnet18",
-        regression_head_bottleneck_layer_size=256,
+        height=preproc.config.mri_slice_height,
+        width=preproc.config.mri_slice_width,
+        resnet="resnet101",
+        regression_head_bottleneck_layer_size=1024,
         regression_head_shrinkage_range=(0.05, 0.25),
         device=DEVICE,
     )
@@ -883,7 +797,7 @@ def main():
         def update_fn(x: PositiveFloat):
             loss.config.sobel_weight = x
 
-        values = {10: 0.2}
+        values = {10: 1, 200: 0}
         return StepValue(
             update_fn=update_fn,
             initial_weight=0.0,
@@ -898,6 +812,15 @@ def main():
 
         def update_fn(x: PositiveFloat):
             m.regression_head.config.noise_weight = x
+
+        initial_weight = 0
+        values = {}
+        return StepValue(
+            update_fn=update_fn,
+            initial_weight=initial_weight,
+            total_epochs=training_config.lp_early_stopping_min_epochs,
+            value_at_epochs={e - 1: v for e, v in values.items()},
+        )
 
         return PulseWindowScheduler(
             update_fn=update_fn,
@@ -942,7 +865,7 @@ def main():
     # Create training configuration.
     training_config = TrainingConfig(
         seed=SEED,
-        gradient_accumulation_steps=1,
+        gradient_accumulation_steps=2,
         gradient_max_norm=1.0,
         # Loss Function ===========================================================
         loss_config=loss_config,
@@ -962,7 +885,7 @@ def main():
         lp_max_epochs=300,
         lp_patience_steps=10,
         lp_learning_rate=0.001,
-        lp_weight_decay=0,
+        lp_weight_decay=1e-4,
         # > Phase B: Fine-Tuning ==================================================
         ft_checkpointer_top_k=3,
         ft_early_stopping_min_epochs=1,
@@ -978,20 +901,23 @@ def main():
     )
 
     # Create logger.
-    wandb_config = WandBConfig(
-        batch_size=BATCH_SIZE,
-        training_config=training_config,
-        dataset_id=cd.dataset_id,
-        dataset_split=(1, 1, 1),
-        data_augmentation=aug,
-        dir=PROJECT_ROOT / "wandb",
-        mode="disabled",
-        group="testing",
-    )
-    logger = WandBLogger(
-        gradient_accumulation_steps=training_config.gradient_accumulation_steps,
-        **wandb_config.wandb_init_kwargs(),
-    )
+    from .logging.noop_logger import NoOpLogger
+
+    logger = NoOpLogger()
+    # wandb_config = WandBConfig(
+    #     batch_size=BATCH_SIZE,
+    #     training_config=training_config,
+    #     dataset_id=cd.dataset_id,
+    #     dataset_split=(1, 1, 1),
+    #     data_augmentation=aug,
+    #     dir=PROJECT_ROOT / "wandb",
+    #     mode="disabled",
+    #     group="testing",
+    # )
+    # logger = WandBLogger(
+    #     gradient_accumulation_steps=training_config.gradient_accumulation_steps,
+    #     **wandb_config.wandb_init_kwargs(),
+    # )
 
     torch.autograd.set_detect_anomaly(True)
     # Train 🦅
