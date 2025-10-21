@@ -45,7 +45,7 @@ class CompositeLoss(torch.nn.modules.loss._Loss):
     def __init__(self, config: CompositeLossConfig):
         super().__init__()
         self.config = config
-        self.ncc = MaskedNCCLoss(reduction=Reduction.MEAN, anticorrelated=True)
+        self.ncc = MaskedNCCLoss(reduction=Reduction.NONE, anticorrelated=True)
         self.sobel = MaskedMeanSquaredGradientErrorLoss()
         self.boundary_heatmap = BoundaryHeatmapMSELoss()
 
@@ -84,7 +84,6 @@ class CompositeLoss(torch.nn.modules.loss._Loss):
             CompositeLossKeys.PARAMS_REG_WEIGHT: None,
         }
 
-    @property
     def latest(self) -> dict[str, float]:
         return {k.value: v for k, v in self._latest.items() if v is not None}
 
@@ -98,19 +97,17 @@ class CompositeLoss(torch.nn.modules.loss._Loss):
         loss = torch.zeros(1, device=y_true.device)
         if ncc_weight := self.config.ncc_weight:
             self._latest[CompositeLossKeys.NCC_WEIGHT] = ncc_weight
-            ncc = self.ncc(y_true, pred.warped_histology_batch, mask)
+            ncc = self.ncc(y_true, pred.warped_haematoxylin, mask).mean()
             self._latest[CompositeLossKeys.NCC] = ncc.item()
             loss += ncc_weight * ncc
         if sobel_weight := self.config.sobel_weight:
             self._latest[CompositeLossKeys.SOBEL_WEIGHT] = sobel_weight
-            sobel = self.sobel.forward(
-                y_true, pred.warped_histology_batch, mask
-            )
+            sobel = self.sobel(y_true, pred.warped_haematoxylin, mask)
             self._latest[CompositeLossKeys.SOBEL] = sobel.item()
             loss += sobel_weight * sobel
         if bhm_weight := self.config.boundary_heatmap_weight:
             self._latest[CompositeLossKeys.BHM_WEIGHT] = bhm_weight
-            bhm = self.boundary_heatmap(mask, pred.warped_histology_mask_batch)
+            bhm = self.boundary_heatmap(mask, pred.warped_haematoxylin_mask)
             self._latest[CompositeLossKeys.BHM] = bhm.item()
             loss += bhm_weight * bhm
         if params_reg_weight := self.config.transformation_parameters_weight:
