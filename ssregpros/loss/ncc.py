@@ -25,7 +25,7 @@ class MaskedNCCLoss(torch.nn.modules.loss._Loss):
     ):
         super().__init__(reduction=reduction)
         self.dtype = dtype
-        self.epsilon_value = torch.finfo(dtype).eps
+        self.epsilon_value = 1e-8
         self.anticorrelated = anticorrelated
 
     def forward(
@@ -42,91 +42,83 @@ class MaskedNCCLoss(torch.nn.modules.loss._Loss):
         y_pred: torch.Tensor
             Model prediction, shape (B, C, H, W)
         mask: torch.Tensor
-            Binary or soft mask, shape (B, 1, H, W)
+            Binary or soft mask, shape (B, 1, H, W), dtype torch.float32
 
         Returns
         -------
         torch.Tensor
-            A single scalar loss value
+            A single scalar loss value, unless reduction is Reduction.NONE
         """
         # Ensure mask is broadcastable and contains at least one nonzero entry.
         if not torch.any(mask):
             raise ValueError("mask is empty!")
-        # > Build soft weights in [0,1], broadcast to channels.
-        if mask.dtype == torch.bool:
-            soft_mask = mask.to(self.dtype)
-        else:
-            soft_mask = mask.to(self.dtype).clamp(0.0, 1.0)
-        if soft_mask.shape[1] != y_true.shape[1]:
-            soft_mask = soft_mask.expand(-1, y_true.shape[1], -1, -1)
+        if mask.shape[1] != y_true.shape[1]:
+            mask = mask.expand(-1, y_true.shape[1], -1, -1)
 
-        # Weighted sums
-        # > Calculate the number of masked pixels per channel.
-        num_pixels = soft_mask.sum(dim=(2, 3), keepdim=True)  # (B, C, 1, 1)
-        # > Avoid division by zero with out-of-place operation
-        num_pixels_safe = num_pixels + (num_pixels == 0).to(self.dtype)
+        # Calculate the number of masked pixels per channel.
+        num_pixels = mask.sum(dim=(2, 3), keepdim=True)  # (B, C, 1, 1)
+        num_pixels_safe = torch.clamp_min(num_pixels, 1.0)
 
-        # > Calculate the masked mean.
-        mu_true = (soft_mask * y_true).sum(
-            dim=(2, 3), keepdim=True
-        ) / num_pixels_safe
-        mu_pred = (soft_mask * y_pred).sum(
-            dim=(2, 3), keepdim=True
-        ) / num_pixels_safe
+        # Calculate the masked mean.
+        sum_true = (mask * y_true).sum(dim=(2, 3), keepdim=True)
+        sum_pred = (mask * y_pred).sum(dim=(2, 3), keepdim=True)
 
-        # > Calculate masked centered values.
-        centered_true = y_true - mu_true
-        centered_pred = y_pred - mu_pred
+        mu_true = sum_true / num_pixels_safe
+        mu_pred = sum_pred / num_pixels_safe
 
-        # > Calculate masked standard deviation.
-        # > var = E[(X - µ)^2]
-        var_true = (soft_mask * centered_true.pow(2)).sum(
-            dim=(2, 3), keepdim=True
-        ) / num_pixels_safe
-        var_pred = (soft_mask * centered_pred.pow(2)).sum(
-            dim=(2, 3), keepdim=True
-        ) / num_pixels_safe
+        # Calculate masked centered values.
+        centered_true = mask * (y_true - mu_true)
+        centered_pred = mask * (y_pred - mu_pred)
 
-        # > Calculate NCC numerator:
-        # > E[(X - µ_x) * (Y - µ_y)]
-        numerator = (soft_mask * centered_true * centered_pred).sum(
-            dim=(2, 3), keepdim=True
-        ) / num_pixels_safe
+        # Calculate covariance and variances in one pass
+        # This avoids computing centered values multiple times
+        cov = (centered_true * centered_pred).sum(dim=(2, 3), keepdim=True)
+        var_true = (centered_true * centered_true).sum(dim=(2, 3), keepdim=True)
+        var_pred = (centered_pred * centered_pred).sum(dim=(2, 3), keepdim=True)
 
-        # > Calculate NCC denominator:
-        # > σ_x × σ_y + epsilon
-        denominator = (
-            var_true.clamp_min(0) * var_pred.clamp_min(0)
-        ).sqrt() + self.epsilon_value
+        # Compute NCC with improved numerical stability
+        # Use the property that NCC = cov / (std_true * std_pred)
+        # But compute it as: cov / sqrt(var_true * var_pred)
+        # with careful handling of the sqrt
+        # Method 1: Clamp before sqrt (more stable)
+        denominator = torch.sqrt(
+            torch.clamp_min(var_true, self.epsilon_value)
+            * torch.clamp_min(var_pred, self.epsilon_value)
+        )
 
-        # > Calculate NCC per channel.
-        ncc = numerator / denominator
-        # > Squeeze spatial dimensions but keep channel dimension for averaging
+        # Add epsilon to denominator for safety
+        ncc = cov / (denominator + self.epsilon_value)
+
+        # Clamp to valid NCC range
+        ncc = torch.clamp(ncc, -1.0, 1.0)
+
+        # Squeeze spatial dimensions but keep channel dimension for averaging
         ncc = ncc.squeeze(-1).squeeze(-1)  # (B, C)
-        # > Average across channels
+        # Average across channels
         ncc = ncc.mean(dim=1)  # (B,)
-        # huh
-        if self.anticorrelated:
-            ncc = -1 * ncc
 
-        # Apply reduction based on support size (out-of-place operations only)
-        # Use the total weight mass per sample
+        # Apply reduction based on support size
         weight_mass = num_pixels[:, 0, 0, 0]  # (B,)
 
         if self.reduction == Reduction.NONE:
-            return 0.5 * (1.0 - ncc.mean())
+            if self.anticorrelated:
+                return 0.5 * (1.0 + ncc)
+            return 0.5 * (1.0 - ncc)
 
         if self.reduction == Reduction.MEAN:
             reduction_weights = weight_mass
         elif self.reduction == Reduction.SQRT:
-            reduction_weights = weight_mass.sqrt()
+            reduction_weights = torch.sqrt(weight_mass)
         elif self.reduction == Reduction.LOG:
-            reduction_weights = weight_mass.clamp_min(1.0).log()
+            reduction_weights = torch.log(torch.clamp_min(weight_mass, 1.0))
         else:
             raise ValueError("unknown reduction")
 
-        # > Normalize weights (out-of-place division)
-        reduction_weights_sum = reduction_weights.sum() + 1e-12
-        reduction_weights = reduction_weights / reduction_weights_sum
+        # Normalize weights
+        reduction_weights = reduction_weights / (
+            reduction_weights.sum() + 1e-12
+        )
 
+        if self.anticorrelated:
+            return 0.5 * (1.0 + (ncc * reduction_weights).sum())
         return 0.5 * (1.0 - (ncc * reduction_weights).sum())
