@@ -14,18 +14,21 @@ from nibabel.affines import voxel_sizes as nib_voxel_sizes
 import torch
 
 
+class MriMetadataKeys(StrEnum):
+    INPUT_MRI_AFFINE_MATRIX = "input_mri_affine_matrix"
+    INPUT_MRI_SHAPE = "input_mri_shape"
+
+
 class MriPipelineKeys(StrEnum):
     # Loading in.
     MRI_VOLUME = "mri_volume"
-    MASK_VOLUME = "mask_volume"
+    MASK_VOLUME = "mri_mask_volume"
     # Calculating RAS index.
-    _INPUT_MRI_AFFINE_MATRIX = "input_mri_affine_matrix"
-    _INPUT_MRI_SHAPE = "input_mri_shape"
     MRI_SLICE_INDEX = "mri_slice_index"
     MRI_SLICE_AXIS = "mri_slice_axis"
     # 2D slices.
     MRI_SLICE = "mri_slice"
-    MRI_MASK_SLICE = "mri_mask_slice"
+    MASK_SLICE = "mri_mask_slice"
 
 
 class CalculateNewSliceIndexd(MapTransform):
@@ -33,12 +36,6 @@ class CalculateNewSliceIndexd(MapTransform):
     Responsible for calculating the new slice index in a newly oriented volume
     given the affine matrix of the original slice index and axis, and the newly
     oriented volume's affine matrix.
-    Assumes the original MRI's shape and affine matrix have been logged under
-
-                • `MRI_PIPELINE_KEYS._INPUT_MRI_SHAPE`
-                • `MRI_PIPELINE_KEYS._INPUT_MRI_AFFINE_MATRIX`
-
-    respectively.
     """
 
     def __init__(self):
@@ -54,21 +51,19 @@ class CalculateNewSliceIndexd(MapTransform):
     def __call__(self, data: dict) -> dict:
         # Retrieve arguments we'll be operating on.
         reoriented_volume: MetaTensor = data[MriPipelineKeys.MRI_VOLUME]
-        original_affine = reoriented_volume.meta[
-            MriPipelineKeys._INPUT_MRI_AFFINE_MATRIX
+        original_affine: torch.Tensor = reoriented_volume.meta[
+            MriMetadataKeys.INPUT_MRI_AFFINE_MATRIX
         ]
-        new_affine = reoriented_volume.affine
+        new_affine: torch.Tensor = reoriented_volume.affine
         original_shape: tuple[int, int, int] = reoriented_volume.meta[
-            MriPipelineKeys._INPUT_MRI_SHAPE
+            MriMetadataKeys.INPUT_MRI_SHAPE
         ]
         assert len(original_shape) == 3
         original_slice_index: int = data[MriPipelineKeys.MRI_SLICE_INDEX]
         slice_axis: MRIAxis = data[MriPipelineKeys.MRI_SLICE_AXIS]
-
-        # Convert affines to Float.
-        original_affine = original_affine.float()
-        new_affine = new_affine.float()
-
+        # Convert affines to float32.
+        original_affine = original_affine.type(torch.float32)
+        new_affine = new_affine.type(torch.float32)
         # Determine the NumPy axis for the slice in the original orientation.
         original_numpy_axis = slice_axis.get_numpy_axis(original_affine)
         # Define a representative point in the center of the original slice plane.
@@ -95,13 +90,16 @@ class CalculateNewSliceIndexd(MapTransform):
         new_numpy_axis = slice_axis.get_numpy_axis(new_affine)
         # Extract the coordinate along the new axis and round to the nearest integer.
         new_slice_index = int(round(new_voxel_coord[new_numpy_axis].item()))
-        # Record transform.
+        # Delete metadata arguments as they're no longer needed.
+        del reoriented_volume.meta[MriMetadataKeys.INPUT_MRI_AFFINE_MATRIX]
+        del reoriented_volume.meta[MriMetadataKeys.INPUT_MRI_SHAPE]
+        # Done.
         data[MriPipelineKeys.MRI_SLICE_INDEX] = new_slice_index
         return data
 
 
 class MRIAndMaskSlicerd(MapTransform):
-    """Transform for slicing into the MRI and binary mask volumes."""
+    """Transform for slicing into the MRI and mask volumes."""
 
     def __init__(self, keepdim: bool):
         super().__init__(
@@ -117,8 +115,9 @@ class MRIAndMaskSlicerd(MapTransform):
 
     def __call__(self, data: dict) -> dict:
         # Get relevant arguments.
-        mri_volume: MetaTensor = data[MriPipelineKeys.MRI_VOLUME]
-        mask_volume: MetaTensor = data[MriPipelineKeys.MASK_VOLUME]
+        # NOTE: .squeeze(0) to remove channel dimension
+        mri_volume: MetaTensor = data[MriPipelineKeys.MRI_VOLUME].squeeze(0)
+        mask_volume: MetaTensor = data[MriPipelineKeys.MASK_VOLUME].squeeze(0)
         slice_index: int = data[MriPipelineKeys.MRI_SLICE_INDEX]
         slice_axis: MRIAxis = data[MriPipelineKeys.MRI_SLICE_AXIS]
         # Get slice index.
@@ -126,10 +125,8 @@ class MRIAndMaskSlicerd(MapTransform):
             mri_volume.affine, slice_index, self.keepdim
         )
         # Slice and store.
-        data[MriPipelineKeys.MRI_SLICE] = mri_volume.squeeze(0)[numpy_slice]
-        data[MriPipelineKeys.MRI_MASK_SLICE] = mask_volume.squeeze(0)[
-            numpy_slice
-        ]
+        data[MriPipelineKeys.MRI_SLICE] = mri_volume[numpy_slice]
+        data[MriPipelineKeys.MASK_SLICE] = mask_volume[numpy_slice]
         return data
 
 
@@ -154,19 +151,19 @@ class SufficientProstatePixelsInMaskd(MapTransform):
 
     def __init__(self, pixel_threshold: int):
         super().__init__(
-            keys=[MriPipelineKeys.MRI_MASK_SLICE],
+            keys=[MriPipelineKeys.MASK_SLICE],
             allow_missing_keys=False,
         )
         self.pixel_threshold = pixel_threshold
 
     def __call__(self, data: dict) -> dict:
         # Obtain mask slice.
-        mask_slice: MetaTensor = data[MriPipelineKeys.MRI_MASK_SLICE]
+        mask_slice: MetaTensor = data[MriPipelineKeys.MASK_SLICE]
         # Are we exiting early?
-        prostate_pixels = int((mask_slice != 0).sum().item())
+        prostate_pixels = (mask_slice == 1).sum().item()
         if prostate_pixels <= self.pixel_threshold:
             data[SharedPipelineKeys.EARLY_EXIT] = (
-                f"{prostate_pixels} ≤ {self.pixel_threshold}"
+                f"(MRI) Prostate area under minimum threshold: {prostate_pixels} ≤ {self.pixel_threshold}"
             )
         return data
 
@@ -183,7 +180,7 @@ class ResampleToIsotropicSpacingd(MapTransform, InvertibleTransform):
             self,
             keys=(
                 MriPipelineKeys.MRI_SLICE,
-                MriPipelineKeys.MRI_MASK_SLICE,
+                MriPipelineKeys.MASK_SLICE,
                 MriPipelineKeys.MRI_VOLUME,
             ),
             allow_missing_keys=False,
@@ -194,7 +191,7 @@ class ResampleToIsotropicSpacingd(MapTransform, InvertibleTransform):
     def __call__(self, data: dict) -> dict:
         # Retrieve arguments we'll be operating on.
         mri_slice: MetaTensor = data[MriPipelineKeys.MRI_SLICE]
-        mask_slice: MetaTensor = data[MriPipelineKeys.MRI_MASK_SLICE]
+        mask_slice: MetaTensor = data[MriPipelineKeys.MASK_SLICE]
         original_volume: MetaTensor = data[MriPipelineKeys.MRI_VOLUME]
         # Clone original inputs for invertability.
         original_mri_slice = mri_slice.clone()
@@ -227,7 +224,7 @@ class ResampleToIsotropicSpacingd(MapTransform, InvertibleTransform):
             size=new_shape,
             mode="bilinear",
             antialias=are_we_downsampling,
-            align_corners=False,
+            align_corners=True,
         ).squeeze(0, 1)
         mask_slice = torch.nn.functional.interpolate(
             mask_slice.unsqueeze(0).unsqueeze(0),
@@ -241,11 +238,11 @@ class ResampleToIsotropicSpacingd(MapTransform, InvertibleTransform):
             MriPipelineKeys.MRI_SLICE,
             extra_info={MriPipelineKeys.MRI_SLICE: original_mri_slice},
         )
-        data[MriPipelineKeys.MRI_MASK_SLICE] = mask_slice
+        data[MriPipelineKeys.MASK_SLICE] = mask_slice
         self.push_transform(
             data,
-            MriPipelineKeys.MRI_MASK_SLICE,
-            extra_info={MriPipelineKeys.MRI_MASK_SLICE: original_mask_slice},
+            MriPipelineKeys.MASK_SLICE,
+            extra_info={MriPipelineKeys.MASK_SLICE: original_mask_slice},
         )
         return data
 
@@ -254,7 +251,7 @@ class ResampleToIsotropicSpacingd(MapTransform, InvertibleTransform):
         # Retrieved stored original values.
         for key in (
             MriPipelineKeys.MRI_SLICE,
-            MriPipelineKeys.MRI_MASK_SLICE,
+            MriPipelineKeys.MASK_SLICE,
         ):
             transform_info = self.pop_transform(data, key)
             data[key] = transform_info["extra_info"][key]
@@ -267,35 +264,37 @@ class CenterCropMriOnMaskd(MapTransform, InvertibleTransform):
     mask slice, adding padding as necessary.
     """
 
-    def __init__(self, patch_size: int):
+    def __init__(self, height: int, width: int):
         MapTransform.__init__(
             self,
             keys=(
                 MriPipelineKeys.MRI_SLICE,
-                MriPipelineKeys.MRI_MASK_SLICE,
+                MriPipelineKeys.MASK_SLICE,
             ),
             allow_missing_keys=False,
         )
         InvertibleTransform.__init__(self)
-        self.patch_size = patch_size
+        self.height = height
+        self.width = width
 
     def __call__(self, data: dict) -> dict:
         # Obtain relevant arguments.
         mri_slice: MetaTensor = data[MriPipelineKeys.MRI_SLICE]
-        mask_slice: MetaTensor = data[MriPipelineKeys.MRI_MASK_SLICE]
+        mask_slice: MetaTensor = data[MriPipelineKeys.MASK_SLICE]
         mri_height, mri_width, _ = (
             data[MriPipelineKeys.MRI_VOLUME].squeeze(0).shape
         )  # NOTE: works because RAS-oriented at this stage
-        patch_size = self.patch_size
+        height = self.height
+        width = self.width
         # Store inputs for invertability.
         original_mri_slice = mri_slice.clone()
         original_mask_slice = mask_slice.clone()
         # Determine crop coordinates from bounding box.
         bbox = Bbox.from_binary_mask(mask_slice)
-        crop_y_start = round(bbox.center_y - patch_size / 2)
-        crop_x_start = round(bbox.center_x - patch_size / 2)
-        crop_y_end = crop_y_start + patch_size
-        crop_x_end = crop_x_start + patch_size
+        crop_y_start = round(bbox.center_y - height / 2)
+        crop_x_start = round(bbox.center_x - width / 2)
+        crop_y_end = crop_y_start + height
+        crop_x_end = crop_x_start + width
         # Calculate and apply padding.
         pad_left = -min(0, crop_x_start)
         pad_right = max(0, crop_x_end - mri_width)
@@ -317,12 +316,12 @@ class CenterCropMriOnMaskd(MapTransform, InvertibleTransform):
         final_crop_y_start = crop_y_start + pad_top
         final_crop_x_start = crop_x_start + pad_left
         mri_patch = padded_mri_slice[
-            final_crop_y_start : final_crop_y_start + patch_size,
-            final_crop_x_start : final_crop_x_start + patch_size,
+            final_crop_y_start : final_crop_y_start + height,
+            final_crop_x_start : final_crop_x_start + width,
         ]
         mask_patch = padded_mask_slice[
-            final_crop_y_start : final_crop_y_start + patch_size,
-            final_crop_x_start : final_crop_x_start + patch_size,
+            final_crop_y_start : final_crop_y_start + height,
+            final_crop_x_start : final_crop_x_start + width,
         ]
         # Record transforms.
         data[MriPipelineKeys.MRI_SLICE] = mri_patch
@@ -331,11 +330,11 @@ class CenterCropMriOnMaskd(MapTransform, InvertibleTransform):
             MriPipelineKeys.MRI_SLICE,
             extra_info={MriPipelineKeys.MRI_SLICE: original_mri_slice},
         )
-        data[MriPipelineKeys.MRI_MASK_SLICE] = mask_patch
+        data[MriPipelineKeys.MASK_SLICE] = mask_patch
         self.push_transform(
             data,
-            MriPipelineKeys.MRI_MASK_SLICE,
-            extra_info={MriPipelineKeys.MRI_MASK_SLICE: original_mask_slice},
+            MriPipelineKeys.MASK_SLICE,
+            extra_info={MriPipelineKeys.MASK_SLICE: original_mask_slice},
         )
         return data
 
@@ -344,7 +343,7 @@ class CenterCropMriOnMaskd(MapTransform, InvertibleTransform):
         # Retrieve original stored values.
         for key in (
             MriPipelineKeys.MRI_SLICE,
-            MriPipelineKeys.MRI_MASK_SLICE,
+            MriPipelineKeys.MASK_SLICE,
         ):
             transform_info = self.pop_transform(data, key)
             data[key] = transform_info["extra_info"][key]
