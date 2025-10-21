@@ -1,6 +1,7 @@
 from ..core import set_deterministic_seed
 from ..core.type_definitions import Percentage
 from .feature_encoder import (
+    ResNetVariant,
     ResNetFeatureEncoder,
     swap_batchnorm2d_for_instancenorm2d,
 )
@@ -11,8 +12,6 @@ from .regression import (
 )
 from .spatial_transformer import SpatialTransformerNetwork
 
-from monai.data.meta_tensor import MetaTensor
-
 
 import torch
 import torch.nn as nn
@@ -22,25 +21,20 @@ from typing import NamedTuple
 
 
 class RegistrationNetworkOutput(NamedTuple):
-    warped_histology_batch: MetaTensor
-    warped_histology_mask_batch: MetaTensor
+    warped_haematoxylin: torch.Tensor
+    warped_haematoxylin_mask: torch.Tensor
     parameters: RegressionTransformedParameters
     thetas: torch.Tensor
 
 
 @dataclass
 class RegistrationNetworkConfig:
-    """Registration network configuration dataclass"""
-
     seed: int
-    height: int = 128
-    width: int = 128
-    model_name: str = "resnet18"
-    regression_head_bottleneck_layer_size: int = 256
-    regression_head_shrinkage_range: tuple[Percentage, Percentage] = (
-        0.05,
-        0.35,
-    )
+    height: int
+    width: int
+    resnet: ResNetVariant
+    regression_head_bottleneck_layer_size: int
+    regression_head_shrinkage_range: tuple[Percentage, Percentage]
     device: torch.device = torch.device("cpu")
 
 
@@ -55,14 +49,12 @@ class RegistrationNetwork(nn.Module):
         self.config = config
 
         # A)    Feature Encoders with fixed-sized outputs.
-        #       NOTE:   swap out histology encoder's `BatchNorm2d`
+        #       NOTE:   swap out haematoxylin encoder's `BatchNorm2d`
         #               layers for `InstanceNorm2d` layers.
-        self.mri_encoder = ResNetFeatureEncoder(
-            model_name=config.model_name
-        ).to(dev)
-        self.histology_encoder: ResNetFeatureEncoder = (
+        self.mri_encoder = ResNetFeatureEncoder(var=config.resnet).to(dev)
+        self.haematoxylin_encoder: ResNetFeatureEncoder = (
             swap_batchnorm2d_for_instancenorm2d(
-                ResNetFeatureEncoder(model_name=config.model_name)
+                ResNetFeatureEncoder(var=config.resnet)
             )
         ).to(
             dev
@@ -73,7 +65,7 @@ class RegistrationNetwork(nn.Module):
             RegressionHeadConfig(
                 num_input_features=(
                     self.mri_encoder.output_size()
-                    + self.histology_encoder.output_size()
+                    + self.haematoxylin_encoder.output_size()
                 ),
                 bottleneck_layer_size=self.config.regression_head_bottleneck_layer_size,
                 shrinkage_range=self.config.regression_head_shrinkage_range,
@@ -89,36 +81,40 @@ class RegistrationNetwork(nn.Module):
         ).to(dev)
 
     def predict_rigid_transform_parameters(
-        self, mri_batch: MetaTensor, histology_list: list[MetaTensor]
+        self,
+        mri_batch: torch.Tensor,
+        haematoxylin_list: list[torch.Tensor],
     ) -> RegressionTransformedParameters:
-        r"""Takes in the batched MRI images and the corresponding histology
+        """
+        Takes in the batched MRI images and the corresponding haematoxylin
         images and returns the rigid transform parameters.
 
         Parameters
         ----------
-        mri_batch: MetaTensor
-            Batch MRI tensors, shape: (B, 1, `self.config.height`, `self.config.width`)
-        histology_list: list[MetaTensor]
-            List of variable-sized histology images with shape (C, $H_i$, $W_i$)
+        mri_batch: torch.Tensor
+            Batched MRIs, shape: (B, 1, `self.config.height`, `self.config.width`)
+        haematoxylin_list: list[torch.Tensor]
+            List of variable-sized haematoxylin images with shape (C, H_i, W_i)
             and length B
 
         Returns
         -------
-        RegressionTransformedParameters"""
-        # Predict parameters.
+        RegressionTransformedParameters
+        """
+        # Build concatenated feature vector using both modalities.
         mri_feature_vector: torch.Tensor = self.mri_encoder(mri_batch)
-        histology_feature_vector = torch.cat(
+        haematoxylin_feature_vector = torch.cat(
             [
-                self.histology_encoder(
-                    hist.unsqueeze(0)  # adding batch dimension
-                )
-                for hist in histology_list
+                self.haematoxylin_encoder(h.unsqueeze(0))  # adding batch dim
+                for h in haematoxylin_list
             ],
             dim=0,
         )
         combined_feature_vector = torch.cat(
-            (mri_feature_vector, histology_feature_vector), dim=1
-        )  # shape: (B, mri_encoder.output_size() + histology_encoder.output_size())
+            (mri_feature_vector, haematoxylin_feature_vector),
+            dim=1,
+        )  # shape: (B, mri_encoder.output_size() + haematoxylin_encoder.output_size())
+        # Predict parameters.
         parameters: RegressionTransformedParameters = self.regression_head(
             combined_feature_vector
         )  # shape ~ (B, 5)
@@ -128,9 +124,9 @@ class RegistrationNetwork(nn.Module):
     def apply_rigid_transform(
         self,
         thetas: torch.Tensor,
-        tensors: list[MetaTensor],
+        tensors: list[torch.Tensor],
         grid_sampling_mode: str,
-    ) -> MetaTensor:
+    ) -> torch.Tensor:
         """Applies a rigid transformation to the given tensors and returns
         their batched output.
 
@@ -138,8 +134,8 @@ class RegistrationNetwork(nn.Module):
         ----------
         thetas: torch.Tensor
             Shape: (B, 2, 3)
-        tensors: list[MetaTensor]
-            Length B, each variable-sized with shape (C, $H_i$, $W_i$),
+        tensors: list[torch.Tensor]
+            Length B, each variable-sized with shape (1, H_i, W_i),
             dtype torch.float32
         grid_sampling_mode: str
             Grid sampling mode used by the spatial transformer network
@@ -151,48 +147,49 @@ class RegistrationNetwork(nn.Module):
 
         Returns
         -------
-        MetaTensor
-            Warped batch, shape (B, C, `self.config.height`, `self.config.weight`)
+        torch.Tensor
+            Warped batch, shape (B, 1, `self.config.height`, `self.config.weight`)
         """
         if not tensors:
             raise ValueError("received empty list of tensors")
-        # Loop through histology and apply the spatial transformer network.
-        warped_histology = []
-        for i, hist in enumerate(tensors):
-            hist = hist.unsqueeze(0)  # shape: (1, C, H_i, W_i)
+        # Loop through tensors and apply the spatial transformer network.
+        warped_tensors = []
+        for i, tensor in enumerate(tensors):
+            tensor = tensor.unsqueeze(0)  # shape: (1, 1, H_i, W_i)
             theta = thetas[i : i + 1, :, :]  # shape: (1, 2, 3)
-            warped_hist = self.stn(
-                hist, theta, mode=grid_sampling_mode
+            warped_tensor = self.stn(
+                tensor, theta, mode=grid_sampling_mode
             )  # shape: (1, 1, config.height, config.width)
-            warped_histology.append(warped_hist)
-        # Batch warped histology images together.
-        warped_histology_batch = torch.cat(
-            warped_histology, dim=0
+            warped_tensors.append(warped_tensor)
+        # Batch warped tensors together.
+        warped_tensors_batch = torch.cat(
+            warped_tensors, dim=0
         )  # shape: (B, 1, config.height, config.width)
         # Done!
-        return warped_histology_batch  # pyright: ignore[reportReturnType]
+        return warped_tensors_batch  # pyright: ignore[reportReturnType]
 
     def forward(
         self,
-        mri_batch: MetaTensor,
-        histology_list: list[MetaTensor],
-        histology_mask_list: list[MetaTensor],
+        mri_batch: torch.Tensor,
+        haematoxylin_list: list[torch.Tensor],
+        haematoxylin_mask_list: list[torch.Tensor],
     ) -> RegistrationNetworkOutput:
         """
-        Takes in the batched MRI tensor, the associated histology list, the
-        corresponding histology mask list, and returns the network's
-        prediction, including the batched warped histology and histology masks.
+        Takes in the batched MRI tensor, the associated haematoxylin images
+        list, the corresponding haematoxylin mask list, and returns the
+        network's prediction, including the batched warped haematoxylin images
+        and masks.
 
         Parameters
         ----------
-        mri_batch: MetaTensor
+        mri_batch: torch.Tensor
             Batched MRI tensors, shape: (B, 1, `self.config.height`, `self.config.width`)
-        histology_list: list[MetaTensor]
-            Length B list of histology samples with varying dimensions, each
+        haematoxylin_list: list[torch.Tensor]
+            Length B list of haematoxylin images with varying dimensions, each
             with shape (1, H_i, W_i), dtype torch.float32
-        histology_mask_list: list[MetaTensor]
-            Length B list of histology masks with varying dimensions, each with
-            shape (1, H_i, W_i), dtype torch.float32
+        haematoxylin_mask_list: list[torch.Tensor]
+            Length B list of haematoxylin masks with varying dimensions, each
+            with shape (1, H_i, W_i), dtype torch.float32
 
         Returns
         -------
@@ -200,20 +197,23 @@ class RegistrationNetwork(nn.Module):
         """
         # Obtain rigid transform parameters.
         parameters = self.predict_rigid_transform_parameters(
-            mri_batch, histology_list
+            mri_batch=mri_batch,
+            haematoxylin_list=haematoxylin_list,
         )
         # Build (B, 2, 3) rigid transform matrices.
         thetas = self.stn.build_theta(parameters)
         # Apply rigid transform matrices.
-        warped_histology_batch = self.apply_rigid_transform(
-            thetas, tensors=histology_list, grid_sampling_mode="bilinear"
+        warped_haematoxylin = self.apply_rigid_transform(
+            thetas, tensors=haematoxylin_list, grid_sampling_mode="bilinear"
         )
-        warped_histology_mask_batch = self.apply_rigid_transform(
-            thetas, tensors=histology_mask_list, grid_sampling_mode="bilinear"
+        warped_haematoxylin_mask = self.apply_rigid_transform(
+            thetas,
+            tensors=haematoxylin_mask_list,
+            grid_sampling_mode="bilinear",
         )
         return RegistrationNetworkOutput(
-            warped_histology_batch=warped_histology_batch,
-            warped_histology_mask_batch=warped_histology_mask_batch,
+            warped_haematoxylin=warped_haematoxylin,
+            warped_haematoxylin_mask=warped_haematoxylin_mask,
             parameters=parameters,
             thetas=thetas,
         )
