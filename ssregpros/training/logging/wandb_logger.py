@@ -26,6 +26,7 @@ class WandBConfig:
     # Experiment.
     batch_size: int
     training_config: TrainingConfig
+    preprocessor_signature: bytes
     dataset_id: str
     dataset_split: tuple[Percentage, Percentage, Percentage]
     data_augmentation: DataAugmentation
@@ -66,6 +67,7 @@ class WandBConfig:
         kwargs["config"] = {
             "device": device,
             "batch_size": self.batch_size,
+            "preprocessor": self.preprocessor_signature.decode("utf-8"),
             "dataset_id": self.dataset_id,
             "dataset_split": to_jsonable(self.dataset_split),
             "code_rev": self.code_rev,
