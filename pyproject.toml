@@ -8,7 +8,7 @@ dependencies = [
     "gitpython>=3.1.45",
     "httpx>=0.28.1",
     "kornia>=0.8.1",
-    "monai[all]==1.5.0",        # https://github.com/Project-MONAI/MONAI/issues/8599
+    "monai[nibabel, openslide, pydicom]==1.5.0", # https://github.com/Project-MONAI/MONAI/issues/8599
     "nibabel>=5.3.2",
     "numpy>=2.3.2",
     "opencv-python>=4.11.0.86",
@@ -18,11 +18,17 @@ dependencies = [
     "scikit-learn>=1.7.1",
     "torch>=2.6.0",
     "torchvision>=0.21.0",
+    "tqdm>=4.67.1",
     "wandb>=0.22.0",
 ]
 
 [dependency-groups]
-dev = ["black>=25.1.0", "hypothesis>=6.138.16", "pytest>=8.4.2"]
+dev = [
+    "black>=25.1.0",
+    "hypothesis>=6.138.16",
+    "matplotlib>=3.10.7",
+    "pytest>=8.4.2",
+]
 
 [tool.black]
 line-length = 80
