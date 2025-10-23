@@ -73,7 +73,7 @@ class CalculateNewSliceIndexd(MapTransform):
                     (
                         (dim - 1) / 2.0
                         if j != original_numpy_axis
-                        else original_slice_index
+                        else original_slice_index % dim
                     )
                     for j, dim in enumerate(original_shape)
                 ),
@@ -84,12 +84,13 @@ class CalculateNewSliceIndexd(MapTransform):
         # Map the voxel coordinate to its physical location.
         physical_coord = torch.matmul(original_affine, source_voxel_coord)
         # Map the physical coordinate back into the voxel shape of the new volume.
-        new_affine_inv = torch.linalg.inv(new_affine)
-        new_voxel_coord = torch.matmul(new_affine_inv, physical_coord)
+        new_voxel_coord = torch.linalg.solve(new_affine, physical_coord)
         # Determine the NumPy axis for the slice in the new orientation.
         new_numpy_axis = slice_axis.get_numpy_axis(new_affine)
         # Extract the coordinate along the new axis and round to the nearest integer.
-        new_slice_index = int(round(new_voxel_coord[new_numpy_axis].item()))
+        new_slice_index = int(
+            torch.floor(new_voxel_coord[new_numpy_axis] + 0.5).item()
+        )
         # Delete metadata arguments as they're no longer needed.
         del reoriented_volume.meta[MriMetadataKeys.INPUT_MRI_AFFINE_MATRIX]
         del reoriented_volume.meta[MriMetadataKeys.INPUT_MRI_SHAPE]
@@ -376,3 +377,52 @@ class Bbox(NamedTuple):
             height=bbox_height,
             width=bbox_width,
         )
+
+
+def main():
+    original_affine = torch.tensor(
+        [
+            [-4.0077e-01, -2.8520e-02, 0.0000e00, 8.7693e01],
+            [2.8520e-02, -4.0077e-01, 0.0000e00, 1.1672e02],
+            [0.0000e00, 0.0000e00, -3.0000e00, 1.1580e02],
+            [0.0000e00, 0.0000e00, 0.0000e00, 1.0000e00],
+        ],
+        dtype=torch.float64,
+    )
+    new_affine = torch.tensor(
+        [
+            [4.0077e-01, 2.8520e-02, 0.0000e00, -1.0420e02],
+            [-2.8520e-02, 4.0077e-01, 0.0000e00, -4.9678e01],
+            [0.0000e00, 0.0000e00, 3.0000e00, 2.8805e01],
+            [0.0000e00, 0.0000e00, 0.0000e00, 1.0000e00],
+        ],
+        dtype=torch.float64,
+    )
+    original_shape = torch.Size([448, 448, 30])
+    original_slice_index = -18
+    slice_axis = MRIAxis.AXIAL
+
+    class ReorientedVolume(NamedTuple):
+        meta: dict[MriMetadataKeys, torch.Tensor | torch.Size]
+        affine: torch.Tensor
+
+    data = {
+        MriPipelineKeys.MRI_VOLUME: ReorientedVolume(
+            meta={
+                MriMetadataKeys.INPUT_MRI_AFFINE_MATRIX: original_affine,
+                MriMetadataKeys.INPUT_MRI_SHAPE: original_shape,
+            },
+            affine=new_affine,
+        ),
+        MriPipelineKeys.MRI_SLICE_INDEX: original_slice_index,
+        MriPipelineKeys.MRI_SLICE_AXIS: slice_axis,
+    }
+
+    import pprint
+
+    pprint.pprint(CalculateNewSliceIndexd()(data))
+    print(original_slice_index)
+
+
+if __name__ == "__main__":
+    main()
