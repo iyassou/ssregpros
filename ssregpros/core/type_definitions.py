@@ -1,5 +1,5 @@
 from annotated_types import Ge, Gt, Le
-from typing import Annotated, get_args, get_origin, Protocol
+from typing import Annotated, Any, get_args, get_origin, Protocol
 
 Percentage = Annotated[float, Ge(0), Le(1)]
 PositiveFloat = Annotated[float, Ge(0)]
@@ -14,7 +14,7 @@ class Scheduler(Protocol):
     def step(self) -> None: ...
 
 
-def assert_annotated_type(value, annotated_type: Annotated, error: Exception):
+def assert_annotated_type(value: Any, annotated_type: Any, error: Exception):
     """Asserts a type annotation, raises an exception on failure."""
     origin: type = get_origin(annotated_type)
     if origin is not Annotated:

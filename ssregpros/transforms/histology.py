@@ -130,9 +130,7 @@ class DynamicOpenSlideReader(WSIReader):
         self.target_microns_per_pixel = target_microns_per_pixel
         self.thumbnail_max_size = thumbnail_max_size
 
-    def get_data(  # pyright: ignore[reportIncompatibleMethodOverride]
-        self, slide: openslide.OpenSlide
-    ):
+    def get_data(self, slide: openslide.OpenSlide):  # type: ignore[override]
         # Determine tissue fraction.
         thumb = slide.get_thumbnail(
             (self.thumbnail_max_size, self.thumbnail_max_size)
@@ -335,7 +333,7 @@ class BinaryMasksFromHaematoxylind(MapTransform):
         haematoxylin = data[HistologyPipelineKeys.HAEMATOXYLIN]
         haematoxylin_uint8: MetaTensor = self.otsu_prep(
             haematoxylin
-        )  # pyright: ignore[reportAssignmentType]
+        )  # type: ignore[assignment]
         haematoxylin_np = haematoxylin_uint8.squeeze().numpy()
         # Obtain mask.
         _, raw_mask = cv2.threshold(haematoxylin_np, 0, 255, cv2.THRESH_OTSU)
@@ -384,7 +382,7 @@ class ResizeAxesToIsotropicMPPd(MapTransform):
             *_, height, width = tensor.shape
             batched = tensor
             while batched.ndim < 4:
-                batched = batched.unsqueeze(0)
+                batched = batched.unsqueeze(0)  # type: ignore[assignment]
             # Calculate indepedent scale factors.
             mpp_x = tensor.meta[HistologyMetadataKeys.ORIGINAL_MPP_X]
             mpp_y = tensor.meta[HistologyMetadataKeys.ORIGINAL_MPP_Y]

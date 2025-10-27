@@ -61,7 +61,7 @@ class RegistrationNetwork(nn.Module):
             )
         ).to(
             dev
-        )  # pyright: ignore[reportAttributeAccessIssue]
+        )  # type: ignore[assignment]
 
         # B)    Regression Head
         self.regression_head = RegressionHead(

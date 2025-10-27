@@ -116,8 +116,8 @@ def serialise(corrs: list[Correspondence]) -> bytes:
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        usage="     python extract.py [markdown]\n"
-        "Example:    python extract.py HMU_*.md",
+        usage=f"     python {FILE_PATH.name} [markdown]\n"
+        f"Example:    python {FILE_PATH.name} HMU_*.md",
     )
     parser.add_argument(
         "markdown",
@@ -128,7 +128,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "-o",
         "--output",
-        default=FILE_PATH.parent.parent.parent
+        default=FILE_PATH.parent.parent
         / "ssregpros"
         / "datasets"
         / "histo_mri"

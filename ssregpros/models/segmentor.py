@@ -1,3 +1,4 @@
+# mypy: disable-error-code="assignment,union-attr"
 from .. import CACHE_ROOT
 from ..transforms.shared import MetaTensorLogging
 

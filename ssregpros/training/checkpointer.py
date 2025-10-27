@@ -102,7 +102,7 @@ class Checkpointer:
             # Model
             with tar.extractfile(
                 tar.getmember("model.safetensors")
-            ) as f:  # pyright: ignore[reportOptionalContextManager]
+            ) as f:  # type: ignore[union-attr]
                 data = f.read()
             state: dict[str, torch.Tensor] = {
                 k: v.to(map_location) for k, v in st.load(data).items()
@@ -111,7 +111,7 @@ class Checkpointer:
             if optimiser:
                 with tar.extractfile(
                     tar.getmember("optimiser.pt")
-                ) as f:  # pyright: ignore[reportOptionalContextManager]
+                ) as f:  # type: ignore[union-attr]
                     opt_bytes = f.read()
                 opt_state = torch.load(
                     io.BytesIO(opt_bytes), map_location=map_location
@@ -121,7 +121,7 @@ class Checkpointer:
             # Metadata
             with tar.extractfile(
                 tar.getmember("meta.json")
-            ) as f:  # pyright: ignore[reportOptionalContextManager]
+            ) as f:  # type: ignore[union-attr]
                 meta = json.loads(f.read().decode("utf-8"))
         return state, opt_state, meta
 
@@ -303,7 +303,7 @@ class Checkpointer:
             dst = src.with_suffix(f".ckpt.tar.{mode}")
             with (
                 zipfile.ZipFile(src, "r") as zin,
-                tarfile.open(  # pyright: ignore[reportCallIssue]
+                tarfile.open(  # type: ignore[call-overload]
                     dst,
                     f"w:{mode}",  # pyright: ignore[reportArgumentType]
                     **kwargs,  # pyright: ignore[reportArgumentType]
@@ -331,7 +331,7 @@ class Checkpointer:
             self._heap,
             key=functools.cmp_to_key(
                 lambda a, b: (
-                    -1 if self.config.is_better(a.metric, b.metric) else 1
+                    -1 if self.config.is_better(a.metric, b.metric) else 1  # type: ignore[attr-defined]
                 )
             ),
         )

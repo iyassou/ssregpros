@@ -3,7 +3,7 @@ from monai.data.meta_tensor import MetaTensor
 from monai.transforms.transform import MapTransform, Transform
 
 from enum import StrEnum
-from typing import Callable, Iterable, Hashable
+from typing import Callable, Collection, Hashable
 
 
 class SharedPipelineKeys(StrEnum):
@@ -51,7 +51,7 @@ class SkipIfKeysPresentd(MapTransform):
 class StandardiseIntensityMaskedd(MapTransform):
     """Standardises intensity using masked statistics."""
 
-    def __init__(self, keys: Iterable[Hashable]):
+    def __init__(self, keys: Collection[Hashable]):
         for pair in keys:
             if not (isinstance(pair, (tuple, list)) and len(pair) == 2):
                 raise TypeError(f"expect iterable of key pairs, not: {pair!r}")

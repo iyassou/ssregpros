@@ -317,7 +317,7 @@ class Preprocessor(MapTransform):
                         pixel_count_threshold=self.config.histology_macenko_pixel_count_threshold,
                         target_microns_per_pixel=self.config.pixel_spacing_micrometres,
                         thumbnail_max_size=self.config.histology_tissue_fraction_estimation_thumbnail_max_size,
-                    ),  # pyright: ignore[reportArgumentType]
+                    ),  # type: ignore[arg-type]
                     dtype="uint8",
                 ),
                 # Prepare for stain deconvolution: estimate tissue mask.

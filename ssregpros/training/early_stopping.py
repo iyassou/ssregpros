@@ -20,7 +20,7 @@ class EarlyStopping:
         self.patience = patience
         self.min_delta_rel = min_delta_rel
         self.min_delta_abs = min_delta_abs
-        self.best = None
+        self.best: float | None = None
         self.num_bad = 0
         if mode not in EarlyStoppingMode.__members__.values():
             raise ValueError(

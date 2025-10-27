@@ -1,4 +1,3 @@
-from ..core.type_definitions import StrictlyPositiveInteger
 from .regression import RegressionTransformedParameters
 
 import torch
@@ -77,12 +76,12 @@ class SpatialTransformerNetwork(torch.nn.Module):
         # Generate the sampling grid.
         grid = F.affine_grid(
             theta,
-            (
+            [
                 x.size(0),
                 x.size(1),
                 self.height,
                 self.width,
-            ),  # pyright: ignore[reportArgumentType]
+            ],  # pyright: ignore[reportArgumentType]
             align_corners=True,
         )
         # Sample the input image using the grid.

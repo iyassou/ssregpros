@@ -76,9 +76,9 @@ class MultiModalDataset(torch.utils.data.Dataset):
         # Some data points are invalid, unfortunately this is where I find out.
         self.valid_data = []
         out: dict
-        for (
-            out
-        ) in self.persistent_dataset:  # pyright: ignore[reportAssignmentType]
+        for out in iter(  # pyright: ignore[reportAssignmentType]
+            self.persistent_dataset
+        ):
             if (reason := out.get(PreprocessorPipelineKeys.EARLY_EXIT)) is None:
                 self.valid_data.append(
                     {
@@ -152,11 +152,9 @@ class MultiModalDatasetView(torch.utils.data.Dataset):
         return len(self.indices)
 
     def __getitem__(self, idx: int) -> dict:
-        data = self.dataset[self.indices[idx]]
+        data: dict = self.dataset[self.indices[idx]]
         if self.transform is not None:
-            data: dict = self.transform(
-                data
-            )  # pyright: ignore[reportAssignmentType]
+            data = self.transform(data)
         return data
 
 

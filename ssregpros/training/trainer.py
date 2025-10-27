@@ -1,7 +1,6 @@
 from .. import PROJECT_ROOT
 from ..core import set_deterministic_seed
 from ..core.type_definitions import (
-    Scheduler,
     PositiveFloat,
     PositiveInteger,
     StrictlyPositiveFloat,

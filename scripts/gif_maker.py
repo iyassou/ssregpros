@@ -180,7 +180,8 @@ def create_stacked_gif(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Create a stacked GIF from image sequences"
+        description="Create a stacked GIF from image sequences",
+        usage=f"uv run {Path(__file__).name} --input_dir path/to/images --output_path out.gif",
     )
 
     parser.add_argument(

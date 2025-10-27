@@ -50,5 +50,5 @@ class MRIAxis(StrEnum):
                 else slice(None)
             )
             for j in range(len(axcodes))
-        )  # pyright: ignore[reportAssignmentType]
+        )  # type: ignore[assignment]
         return slicer
