@@ -11,9 +11,17 @@ RAW_DATA_ROOT.mkdir(exist_ok=True)
 PROCESSED_DATA_ROOT = _DATASET_ROOT / "preprocessed"
 PROCESSED_DATA_ROOT.mkdir(exist_ok=True)
 
-import git
+import os
 
-try:
-    LATEST_COMMIT_SHA = git.Repo(PROJECT_ROOT).head.commit.hexsha
-except ValueError:
-    LATEST_COMMIT_SHA = "fake-git-SHA1"
+LATEST_COMMIT_SHA: str
+_LATEST_COMMIT_SHA = os.environ.get("SSREGPROS_LATEST_GIT_COMMIT_SHA", None)
+if not _LATEST_COMMIT_SHA:
+    from git import Repo
+    from git.exc import InvalidGitRepositoryError
+
+    try:
+        LATEST_COMMIT_SHA = Repo(PROJECT_ROOT).head.commit.hexsha
+    except (ValueError, InvalidGitRepositoryError):
+        LATEST_COMMIT_SHA = "fake-git-SHA1"
+else:
+    LATEST_COMMIT_SHA = _LATEST_COMMIT_SHA
