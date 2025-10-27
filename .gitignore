@@ -13,16 +13,10 @@ wheels/
 .hypothesis
 .pytest_cache
 
-# Checkpoints
-checkpoints/
-
-# WandB
-wandb/
+# Cache, Checkpoints, and WandB folders.
+cache
+checkpoints
+wandb
 
 # MacOS
 .DS_Store
-
-# Cache
-cache/
-
-
