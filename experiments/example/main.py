@@ -1,3 +1,5 @@
+from .. import cache_path, checkpoints_path
+
 from ssregpros.datasets.fake_histo_mri.fake_histo_mri import FakeHistoMri
 from ssregpros.loss.composite import CompositeLossConfig
 from ssregpros.models.registration import RegistrationNetworkConfig
@@ -78,7 +80,7 @@ def split_dataset(
         correspondence_discoverer=FakeHistoMri(),
         segmentor=Segmentor(device=device),
         preprocessor=Preprocessor(preprocessor_config),
-        cache_dir=FILE_DIR_PATH / "cache",
+        cache_dir=cache_path(FILE_DIR_PATH),
         device=device,
     )
     # Split dataset.
@@ -120,7 +122,7 @@ def main():
     training_config = TrainingConfig(
         seed=config["seed"],
         loss_config=loss_config,
-        checkpointer_root=FILE_DIR_PATH / "checkpoints",
+        checkpointer_root=checkpoints_path(FILE_DIR_PATH),
         **config["training"],
     )
     # Create dataloaders.

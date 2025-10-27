@@ -1,3 +1,5 @@
+from .. import cache_path, checkpoints_path, wandb_path
+
 from ssregpros.datasets.histo_mri.histo_mri import HistoMri
 from ssregpros.loss.composite import CompositeLossConfig
 from ssregpros.models.registration import RegistrationNetworkConfig
@@ -43,17 +45,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--cache_dir",
-        help="Path to directory under which to save all runs.",
+        help="Path to directory under which to save preprocessed data.",
         type=Path,
         required=False,
-        default=FILE_DIR_PATH / "cache",
+        default=cache_path(FILE_DIR_PATH),
     )
     parser.add_argument(
         "--checkpoint_dir",
         help="Directory under which to save checkpoints.",
         type=Path,
         required=False,
-        default=FILE_DIR_PATH / "checkpoints",
+        default=checkpoints_path(FILE_DIR_PATH),
     )
     parser.add_argument(
         "--use_data_augmentation",
@@ -154,7 +156,7 @@ def main():
         dataset_id=cd.dataset_id,
         dataset_split=config["dataset_split"],
         data_augmentation=aug,
-        dir=args.cache_dir / "wandb",
+        dir=wandb_path(FILE_DIR_PATH),
         mode="online",
         group="histo-mri",
     )
