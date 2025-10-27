@@ -10,7 +10,7 @@ dependencies = [
     "kornia>=0.8.1",
     "monai[nibabel, openslide, pydicom]==1.5.0", # https://github.com/Project-MONAI/MONAI/issues/8599
     "nibabel>=5.3.2",
-    "numpy>=2.3.2",
+    "numpy>=2.0.0,<2.3.0",
     "opencv-python>=4.11.0.86",
     "pandas[excel]>=2.3.1",
     "pyyaml>=6.0.2",
@@ -27,6 +27,8 @@ dev = [
     "black>=25.1.0",
     "hypothesis>=6.138.16",
     "matplotlib>=3.10.7",
+    "mypy>=1.18.2",
+    "pillow>=11.3.0",
     "pytest>=8.4.2",
 ]
 
@@ -34,3 +36,7 @@ dev = [
 line-length = 80
 target-version = ["py311"]
 skip-string-normalization = false
+
+[[tool.mypy.overrides]]
+module = ["torchvision.*"]
+follow_untyped_imports = true
