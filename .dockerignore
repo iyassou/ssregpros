@@ -1,0 +1,76 @@
+# Python - use ** to match at any depth
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+**/*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+**/*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+.uv/
+venv/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+**/*.swp
+**/*.swo
+**/*~
+
+# OS
+**/.DS_Store
+**/Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Testing
+.pytest_cache/
+.hypothesis/
+.tox/
+.coverage
+htmlcov/
+
+# Images
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.gif
+
+# ssregpros repo
+cache/
+checkpoints/
+datasets/
+experiments/*/cache/
+experiments/*/checkpoints/
+experiments/*/wandb/
+wandb/
+
+**/*.pt
+**/*.nii.gz
+**/*.ndpi
+**/*.dicom
+
+# Docker
+Dockerfile
+.dockerignore
+*.sif
+*.tar.gz
