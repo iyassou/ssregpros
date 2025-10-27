@@ -8,7 +8,7 @@ dependencies = [
     "gitpython>=3.1.45",
     "httpx>=0.28.1",
     "kornia>=0.8.1",
-    "monai[nibabel, openslide, pydicom]==1.5.0", # https://github.com/Project-MONAI/MONAI/issues/8599
+    "monai[nibabel, openslide, pydicom, skimage]==1.5.0", # https://github.com/Project-MONAI/MONAI/issues/8599
     "nibabel>=5.3.2",
     "numpy>=2.0.0,<2.3.0",
     "opencv-python>=4.11.0.86",
