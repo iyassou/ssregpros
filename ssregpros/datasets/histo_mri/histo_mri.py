@@ -27,9 +27,9 @@ class HistoMri(CorrespondenceDiscoverer):
         mri_dir = self.root_dir / "MRI"
         if not mri_dir.exists():
             raise FileNotFoundError("could not find 'MRI' directory!")
-        dicom_dir = mri_dir / "DICOM"
-        if not dicom_dir.exists():
-            raise FileNotFoundError("could not find 'DICOM' directory!")
+        trial_dir = mri_dir / "HISTO_MR"
+        if not trial_dir.exists():
+            raise FileNotFoundError("could not find 'HISTO_MR' directory!")
         # > NDPI
         hist_dir = self.root_dir / "Histology"
         if not hist_dir.exists():
@@ -46,20 +46,22 @@ class HistoMri(CorrespondenceDiscoverer):
             mri_slice_index,
         ) in HISTO_MRI_BASE_CORRESPONDENCES:
             # > MRI filepath.
-            mri_dir = dicom_dir / patient_id / "T2W"
-            if not mri_dir.exists():
+            t2w_dir = next(  # type: ignore[assignment]
+                filter(
+                    lambda x: x.name.startswith("T2W"),
+                    (trial_dir / patient_id).iterdir(),
+                ),
+                None,
+            )
+            if t2w_dir is None:
                 raise FileNotFoundError(
                     f"could not find T2W directory for {patient_id=}!"
                 )
-            # NOTE: should be the only DICOM file in the directory
-            dicoms = list(
-                filter(lambda f: f.suffix == ".dcm", mri_dir.iterdir())
-            )
-            if (num_dicoms := len(dicoms)) != 1:
-                raise ValueError(
-                    f"expected only 1 DICOM file in patient directory, found {num_dicoms}!"
+            mri_filepath = t2w_dir / "DICOM"
+            if not mri_filepath.exists():
+                raise FileNotFoundError(
+                    f"could not find 'DICOM' directory for {patient_id=}!"
                 )
-            mri_filepath = dicoms[0]
             # > Histology filepath.
             histology_dir = ndpi_dir / patient_id
             if not histology_dir.exists():
