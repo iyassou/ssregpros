@@ -16,6 +16,7 @@ class MultiModalPersistentDataLoaderOutput(NamedTuple):
     correspondence_id: tuple[str]
     mri: torch.Tensor
     mri_mask: torch.Tensor
+    mri_mask_sdt: torch.Tensor
     haematoxylin: list[torch.Tensor]
     haematoxylin_mask: list[torch.Tensor]
     histology: list[torch.Tensor] | None
@@ -33,19 +34,21 @@ class MultiModalPersistentDataLoaderCollator:
     ) -> MultiModalPersistentDataLoaderOutput:
         """Collates dictionary inputs coming from the preprocessing pipeline
         into a standardised named tuple."""
-        # Collate the correspondences representations, MRI slices,
-        # and mask slices in the usual way.
+        # Collate the correspondences representations, MRI slices, mask slices,
+        # mask slice SDTs in the usual way.
         corrs: tuple[str]
         mri: torch.Tensor
         mri_mask: torch.Tensor
-        corrs, mri, mri_mask = map(
-            default_collate,
+        mri_mask_sdt: torch.Tensor
+        corrs, mri, mri_mask, mri_mask_sdt = map(
+            default_collate,  # type: ignore[arg-type]
             zip(
                 *(
                     (
                         str(d[PKeys.CORRESPONDENCE]),
                         d[MKeys.MRI_SLICE],
                         d[MKeys.MASK_SLICE],
+                        d[MKeys.MASK_SLICE_SDT],
                     )
                     for d in batch
                 )
@@ -55,19 +58,19 @@ class MultiModalPersistentDataLoaderCollator:
         # of tensors.
         haematoxylin: list[torch.Tensor]
         haematoxylin_mask: list[torch.Tensor]
-        haematoxylin, haematoxylin_mask = zip(
-            *[
+        haematoxylin, haematoxylin_mask = zip(  # type: ignore[assignment]
+            *(
                 (d[HKeys.HAEMATOXYLIN], d[HKeys.HAEMATOXYLIN_MASK])
                 for d in batch
-            ]
+            )
         )  # pyright: ignore[reportAssignmentType]
         # Collate visualisation-only tensors.
         histology: list[torch.Tensor] | None
         histology_mask: list[torch.Tensor] | None
         if self.visualisation:
-            histology, histology_mask = zip(
+            histology, histology_mask = zip(  # type: ignore[assignment]
                 *[(d[HKeys.HISTOLOGY], d[HKeys.HISTOLOGY_MASK]) for d in batch]
-            )  # pyright: ignore[reportAssignmentType]
+            )
         else:
             histology = None
             histology_mask = None
@@ -76,6 +79,7 @@ class MultiModalPersistentDataLoaderCollator:
             correspondence_id=corrs,
             mri=mri,
             mri_mask=mri_mask,
+            mri_mask_sdt=mri_mask_sdt,
             haematoxylin=haematoxylin,
             haematoxylin_mask=haematoxylin_mask,
             histology=histology,
