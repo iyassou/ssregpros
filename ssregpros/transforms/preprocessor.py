@@ -8,6 +8,7 @@ from .mri import (
     SufficientProstatePixelsInMaskd,
     ResampleToIsotropicSpacingd,
     CenterCropMriOnMaskd,
+    MRIMaskSignedDistanceTransformd,
 )
 from .histology import (
     HistologyPipelineKeys,
@@ -146,7 +147,8 @@ class Preprocessor(MapTransform):
             (5) check foreground pixel count threshold for early exit
             (6) resample MRI and mask to isotropic pixel spacing
             (7) center-crop prostate on MRI using mask
-            (8) z-score prostate using mask
+            (8) compute mask's signed-distance transform
+            (9) z-score prostate using mask
         """
         early_exit_pixel_threshold = ceil(
             self.config.mri_mask_prostate_area_square_millimetres_threshold
@@ -161,10 +163,12 @@ class Preprocessor(MapTransform):
                     height=self.config.mri_slice_height,
                     width=self.config.mri_slice_width,
                 ),
+                MRIMaskSignedDistanceTransformd(),
                 EnsureChannelFirstd(
                     keys=[
                         MriPipelineKeys.MRI_SLICE,
                         MriPipelineKeys.MASK_SLICE,
+                        MriPipelineKeys.MASK_SLICE_SDT,
                     ]
                 ),
                 StandardiseIntensityMaskedd(
@@ -176,8 +180,18 @@ class Preprocessor(MapTransform):
         )
         return Compose(
             [
-                # Load into consistent shape.
-                LoadImaged(keys=[MriPipelineKeys.MRI_VOLUME]),
+                # Load into consistent orientation.
+                # NOTE: `affine_lps_to_ras` is a slightly misleading name. ITK
+                #       uses the LPS coordinate system convention internally.
+                #       When set to `True`, this uses the RAS coordinate system
+                #       convention instead. It does not change the MRI volume's
+                #       orientation.
+                LoadImaged(
+                    reader="ITKReader",
+                    reverse_indexing=False,
+                    affine_lps_to_ras=True,
+                    keys=[MriPipelineKeys.MRI_VOLUME],
+                ),
                 EnsureChannelFirstd(
                     keys=[
                         MriPipelineKeys.MRI_VOLUME,
@@ -264,7 +278,7 @@ class Preprocessor(MapTransform):
                 ),
             ]
         )
-        scale_match_mri_and_postprocess = Compose(
+        match_mri_scale_and_postprocess = Compose(
             [
                 # Scale haematoxylin and RGB histology from [0, 255] to [0, 1].
                 ScaleIntensityRanged(
@@ -334,7 +348,7 @@ class Preprocessor(MapTransform):
                             # Preprocessor further.
                             SkipIfKeysPresentd(
                                 keys=[SharedPipelineKeys.EARLY_EXIT],
-                                transform=scale_match_mri_and_postprocess,
+                                transform=match_mri_scale_and_postprocess,
                             ),
                         ]
                     ),
@@ -398,7 +412,11 @@ class Preprocessor(MapTransform):
         ) is not None:
             return output | {ee: reason}
         # Combine results.
-        mri_keep = MriPipelineKeys.MRI_SLICE, MriPipelineKeys.MASK_SLICE
+        mri_keep = (
+            MriPipelineKeys.MRI_SLICE,
+            MriPipelineKeys.MASK_SLICE,
+            MriPipelineKeys.MASK_SLICE_SDT,
+        )
         hist_keep = (
             HistologyPipelineKeys.HAEMATOXYLIN,
             HistologyPipelineKeys.HAEMATOXYLIN_MASK,
