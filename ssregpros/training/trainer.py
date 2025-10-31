@@ -10,6 +10,7 @@ from ..core.type_definitions import (
 from ..loss import Reduction
 from ..loss.composite import (
     CompositeLoss,
+    CompositeLossInput,
     CompositeLossConfig,
     CompositeLossKeys,
 )
@@ -45,6 +46,7 @@ from monai.metrics.meandice import DiceMetric
 from pathlib import Path
 from typing import Annotated, Any, Callable, get_args, get_origin
 
+import math
 import operator
 import torch
 import tqdm
@@ -152,6 +154,7 @@ def train_for_one_epoch(
     ):
         mri_batch = dl_output.mri
         mri_mask_batch = dl_output.mri_mask
+        mri_mask_sdt_batch = dl_output.mri_mask_sdt
         haematoxylin = dl_output.haematoxylin
         haematoxylin_mask = dl_output.haematoxylin_mask
         # Get model prediction.
@@ -162,7 +165,12 @@ def train_for_one_epoch(
         )
         # Compute and record loss.
         loss: torch.Tensor = loss_function.forward(
-            y_true=mri_batch, pred=pred, mask=mri_mask_batch
+            CompositeLossInput(
+                mri=mri_batch,
+                mri_mask=mri_mask_batch,
+                mri_mask_sdt=mri_mask_sdt_batch,
+                prediction=pred,
+            ),
         )
         metric_averager.update(
             **{f"train/{k}": v for k, v in loss_function.latest().items()}
@@ -210,6 +218,7 @@ def evaluate(
     ):
         mri_batch = dl_output.mri
         mri_mask_batch = dl_output.mri_mask
+        mri_mask_sdt_batch = dl_output.mri_mask_sdt
         haematoxylin = dl_output.haematoxylin
         haematoxylin_mask = dl_output.haematoxylin_mask
         histology = dl_output.histology
@@ -223,11 +232,18 @@ def evaluate(
             haematoxylin_mask_list=haematoxylin_mask,
         )
         # Compute and record loss.
-        loss_function(y_true=mri_batch, pred=pred, mask=mri_mask_batch)
+        loss_function.forward(
+            CompositeLossInput(
+                mri=mri_batch,
+                mri_mask=mri_mask_batch,
+                mri_mask_sdt=mri_mask_sdt_batch,
+                prediction=pred,
+            ),
+        )
         # Compute Dice score between MRI and haematoxylin masks.
         dice: float = (
             dice_metric(mri_mask_batch, pred.warped_haematoxylin_mask)
-            .mean()  # pyright: ignore[reportAttributeAccessIssue]
+            .mean()  # type: ignore[union-attr]
             .item()
         )
         metric_averager.update(
@@ -250,7 +266,7 @@ def evaluate(
             mri_mask=mri_mask_batch,
             histology=histology,
             histology_mask=histology_mask,
-            canny_band_sigma=loss_function.boundary_heatmap.sigma,
+            canny_band_sigma=3 / (2 * math.sqrt(2 * math.log(2))),  # ~1.27
             display_in_clinical_convention=True,
         )
         # Add visual metrics.
@@ -497,7 +513,7 @@ def train_model(
                 metric_averager=validation_metric_averager,
                 dice_metric=dice_metric,
                 epoch=epoch,
-                save_to_disk=("lp", *save_to_disk) if save_to_disk else None,
+                save_to_disk=("lp", *save_to_disk) if save_to_disk else None,  # type: ignore[misc]
             )
             validation_metrics = validation_metric_averager.mean()
             # Log.
@@ -518,14 +534,14 @@ def train_model(
             )
             logger.log_epoch_metrics(metrics=metrics, epoch=epoch)
             # Obtain relevant metric.
-            relevant_metric: float = metrics[
+            relevant_metric_lp: float = metrics[
                 monitored_metric
-            ]  # pyright: ignore[reportAssignmentType]
+            ]  # type: ignore[assignment]
             # Checkpointing?
             lp_checkpointer.consider(
                 epoch=epoch,
                 model=model,
-                metric=relevant_metric,
+                metric=relevant_metric_lp,
                 training_config=training_config_dict,
                 optimiser=None,
             )
@@ -535,7 +551,7 @@ def train_model(
             # Stopping early?
             if (
                 epoch >= training_config.lp_early_stopping_min_epochs
-                and lp_epoch_early_stopper.step(relevant_metric)
+                and lp_epoch_early_stopper.step(relevant_metric_lp)
             ):
                 break
         LAST_LP_EPOCH = epoch  # pyright: ignore[reportPossiblyUnboundVariable]
@@ -650,7 +666,7 @@ def train_model(
                 metric_averager=validation_metric_averager,
                 dice_metric=dice_metric,
                 epoch=LAST_LP_EPOCH + epoch,
-                save_to_disk=("ft", *save_to_disk) if save_to_disk else None,
+                save_to_disk=("ft", *save_to_disk) if save_to_disk else None,  # type: ignore[misc]
             )
             validation_metrics = validation_metric_averager.mean()
             # Log.
@@ -665,7 +681,7 @@ def train_model(
                 epoch=epoch,
             )
             metrics = (
-                {"phase": "fine_tune", "epoch_ft": epoch}
+                {"phase": "fine_tune", "epoch_ft": epoch}  # type: ignore[assignment]
                 | training_metrics
                 | validation_metrics
             )
@@ -674,12 +690,12 @@ def train_model(
                 metrics=metrics, epoch=LAST_LP_EPOCH + epoch
             )
             # Obtain relevant metric.
-            relevant_metric: float = metrics[monitored_metric]
+            relevant_metric_ft: float = metrics[monitored_metric]  # type: ignore[assignment]
             # Checkpointing?
             ft_checkpointer.consider(
                 epoch=epoch,
                 model=model,
-                metric=relevant_metric,
+                metric=relevant_metric_ft,
                 training_config=training_config_dict,
                 optimiser=None,
             )
@@ -690,11 +706,11 @@ def train_model(
             if (
                 epoch >= training_config.ft_early_stopping_min_epochs
                 and thawer.melted()
-                and ft_epoch_early_stopper.step(relevant_metric)
+                and ft_epoch_early_stopper.step(relevant_metric_ft)
             ):
                 break
             # Unfreeze next block if on local plateau.
-            if unfreeze_scheduler.step(relevant_metric):
+            if unfreeze_scheduler.step(relevant_metric_ft):
                 if thawer.next() is not None:
                     # Block was unfrozen, reset scheduler AND
                     # early stopper.
@@ -792,20 +808,6 @@ def main():
     # Create phase A schedulers.
     from .scheduler import CosineAnnealing, PulseWindowScheduler, StepValue
 
-    def lp_sobel_scheduler_factory(hook: SchedulerHook) -> Scheduler:
-        _, loss = hook
-
-        def update_fn(x: PositiveFloat):
-            loss.config.sobel_weight = x
-
-        values = {10: 1, 200: 0}
-        return StepValue(
-            update_fn=update_fn,
-            initial_weight=0.0,
-            total_epochs=training_config.lp_early_stopping_min_epochs,
-            value_at_epochs={e - 1: v for e, v in values.items()},
-        )
-
     def lp_noise_scheduler_factory(
         hook: SchedulerHook,
     ) -> Scheduler:
@@ -815,7 +817,7 @@ def main():
             m.regression_head.config.noise_weight = x
 
         initial_weight = 0
-        values = {}
+        values: dict[int, float] = {}
         return StepValue(
             update_fn=update_fn,
             initial_weight=initial_weight,
@@ -842,7 +844,6 @@ def main():
 
     lp_scheduler_factories = [
         # lp_noise_scheduler_factory,
-        # lp_sobel_scheduler_factory,
     ]
 
     # Create phase B schedulers.
@@ -851,10 +852,11 @@ def main():
     # Create loss function.
     loss_config = CompositeLossConfig(
         ncc_weight=1,
-        sobel_weight=0,
-        boundary_heatmap_weight=0,
+        hinged_mask_leakage_weight=1,
         transformation_parameters_weight=1,
         # ====
+        hinged_mask_leakage_epsilon=0.1,
+        hinged_mask_leakage_delta=0.0,
         transformation_regularisation_config=RigidTransformRegularisationLossConfig(
             translation_weight=1,
             scale_weight=1,
