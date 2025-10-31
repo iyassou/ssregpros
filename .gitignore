@@ -20,3 +20,6 @@ wandb
 
 # MacOS
 .DS_Store
+
+# MyPy
+.mypy_cache
