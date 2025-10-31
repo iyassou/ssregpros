@@ -7,6 +7,7 @@ from monai.transforms.transform import MapTransform
 
 from copy import deepcopy
 from enum import StrEnum
+from scipy.ndimage import distance_transform_edt
 from typing import NamedTuple
 
 
@@ -29,6 +30,7 @@ class MriPipelineKeys(StrEnum):
     # 2D slices.
     MRI_SLICE = "mri_slice"
     MASK_SLICE = "mri_mask_slice"
+    MASK_SLICE_SDT = "mri_mask_slice_sdt"
 
 
 class CalculateNewSliceIndexd(MapTransform):
@@ -348,6 +350,35 @@ class CenterCropMriOnMaskd(MapTransform, InvertibleTransform):
         ):
             transform_info = self.pop_transform(data, key)
             data[key] = transform_info["extra_info"][key]
+        return data
+
+
+class MRIMaskSignedDistanceTransformd(MapTransform):
+    """
+    Computes the signed-distance transform of the MRI mask, setting the
+    inside of the prostate to negative distances and the background to
+    positive distances.
+    """
+
+    def __init__(self):
+        super().__init__(
+            keys=[MriPipelineKeys.MASK_SLICE],
+            allow_missing_keys=False,
+        )
+
+    def __call__(self, data: dict) -> dict:
+        # Obtain mask slice.
+        mask_slice: MetaTensor = data[MriPipelineKeys.MASK_SLICE]
+        # Calculate SDT.
+        distance_to_foreground = distance_transform_edt(1 - mask_slice)
+        distance_to_background = distance_transform_edt(mask_slice)
+        sdt = (
+            distance_to_foreground - distance_to_background  # type: ignore[operator]
+        )  # pyright: ignore[reportOperatorIssue]
+        # Done.
+        data[MriPipelineKeys.MASK_SLICE_SDT] = MetaTensor(sdt).copy_meta_from(
+            mask_slice
+        )
         return data
 
 
